@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<!-- SVG favicon - your main logo -->
+<link rel="icon" href="{{ url_for('static', filename='img/logo_deeray.svg') }}" type="image/svg+xml">
+
+<!-- Fallback favicon.ico for older browsers -->
+<link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}" sizes="any">
+
+<!-- Apple Touch Icon -->
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png') }}">
+
+<!-- Android/Chrome icons -->
+<link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+
+<!-- Theme color for browser UI -->
+<meta name="theme-color" content="#262626">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}DEERAY TG BOT{% endblock %}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/normalize.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+    {% block extra_css %}{% endblock %}
+</head>
+<body>
+    {% include 'includes/header.html' %}
+
+    <div class="container">
+        {% include 'includes/sidebar.html' %}
+
+        <div class="main-content">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="flash-messages">
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }}">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+
+            {% block content %}{% endblock %}
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    {% block extra_js %}{% endblock %}
+</body>
+</html>

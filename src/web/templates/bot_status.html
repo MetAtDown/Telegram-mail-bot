@@ -1,0 +1,107 @@
+{% extends 'base.html' %}
+
+{% block title %}Статус бота | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Статус бота</h1>
+    <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> На главную
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header {% if status and status.running %}status-active-header{% else %}status-inactive-header{% endif %}">
+        Текущий статус: {% if status and status.running %}Работает{% else %}Неактивен{% endif %}
+    </div>
+    <div class="panel-body">
+        <div class="bot-status-info">
+            <div class="status-row">
+                <div class="status-item">
+                    <span class="status-indicator {% if status and status.forwarder_active %}status-active{% else %}status-inactive{% endif %}"></span> Проверка почты
+                </div>
+                <div class="bot-uptime">
+                    Время работы бота:
+                    <span class="uptime-value">{{ status.uptime|default('-') }}</span>
+                </div>
+                <div class="status-controls">
+                    {% if status and status.running %}
+                    <form method="post" action="{{ url_for('stop_bot_handler') }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите остановить бота?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-danger">Остановить бота</button>
+                    </form>
+                    {% else %}
+                    <form method="post" action="{{ url_for('start_bot_handler') }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите запустить бота?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-success">Запустить бота</button>
+                    </form>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="status-row">
+                <div class="status-item">
+                    <span class="status-indicator {% if status and status.bot_active %}status-active{% else %}status-inactive{% endif %}"></span> Telegram бот
+                </div>
+                <div class="last-check">
+                    Последняя проверка:
+                    <div>{{ status.last_check|default('-') }}</div>
+                </div>
+                <div class="status-controls">
+                    <button type="button" id="refresh-status" class="btn btn-primary">Обновить статус</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-body">
+        <h2>Deeray TG BOT выполняет следующие задачи:</h2>
+        <ul class="bot-tasks-list">
+            <li>Проверяет новые письма в указанном почтовом ящике;</li>
+            <li>Фильтрует письма по указанным темам;</li>
+            <li>Перенаправляет релевантные письма пользователям в Telegram.</li>
+        </ul>
+        
+        <div class="bot-warning">Если бот остановлен, уведомления в Telegram не будут отправляться.</div>
+    </div>
+</div>
+
+{% block extra_js %}
+<script>
+    document.addEventListener('DOMContentLoaded', function() {
+        document.getElementById('refresh-status').addEventListener('click', function() {
+            // Показываем индикатор загрузки
+            this.innerHTML = 'Обновление...';
+            this.disabled = true;
+            this.classList.add('loading');
+            
+            // Делаем запрос на получение актуального статуса
+            fetch('{{ url_for("bot_status_api") }}')
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Ошибка сети: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Статус получен:', data);
+                    setTimeout(() => {
+                        location.reload();
+                    }, 500);
+                })
+                .catch(error => {
+                    console.error('Ошибка при обновлении статуса:', error);
+                    alert('Произошла ошибка при обновлении статуса: ' + error.message);
+                })
+                .finally(() => {
+                    // Восстанавливаем кнопку
+                    this.innerHTML = 'Обновить статус';
+                    this.disabled = false;
+                    this.classList.remove('loading');
+                });
+        });
+    });
+</script>
+{% endblock %}
+{% endblock %}

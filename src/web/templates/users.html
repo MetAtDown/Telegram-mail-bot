@@ -1,0 +1,86 @@
+{% extends 'base.html' %}
+
+{% block title %}Пользователи | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="users-page">
+    <div class="page-header">
+        <h1>Пользователи</h1>
+        <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+            <span>◀</span> На главную
+        </a>
+    </div>
+
+    <div class="user-actions">
+        <a href="{{ url_for('add_user') }}" class="btn btn-primary">Добавить пользователя</a>
+    </div>
+
+    <div class="search-container">
+        <input type="text" class="search-input" placeholder="Поиск по chat_id или статусу..." value="{{ search_query or '' }}">
+        <div class="search-controls">
+            <button type="button" class="btn search-btn">Поиск</button>
+            <button type="button" class="btn clear-btn">Очистить</button>
+            <div class="results-counter">Найдено: {{ total_users }}</div>
+        </div>
+    </div>
+
+    <table class="users-table">
+        <thead>
+            <tr>
+                <th>Chat ID</th>
+                <th>Статус</th>
+                <th>Кол-во тем</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td>{{ user.chat_id }}</td>
+                <td class="status-cell">
+                    <span class="status-text {% if user.is_enabled %}active{% else %}inactive{% endif %}">
+                        {{ user.status }}
+                    </span>
+                </td>
+                <td>{{ user.subject_count }}</td>
+                <td class="actions-cell">
+                    <a href="{{ url_for('user_details', chat_id=user.chat_id) }}" class="btn btn-primary details-btn">Подробнее</a>
+                    <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-danger delete-btn">Удалить</button>
+                    </form>
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="4" class="text-center">Пользователи не найдены</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="users-count">Всего: {{ total_users }} пользователей</div>
+
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        {% if page > 1 %}
+        <a href="{{ url_for('users', page=page-1, search=search_query) }}" class="pagination-item"><<</a>
+        {% endif %}
+        
+        {% for i in range(1, total_pages + 1) %}
+        <a href="{{ url_for('users', page=i, search=search_query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+        {% endfor %}
+        
+        {% if page < total_pages %}
+        <a href="{{ url_for('users', page=page+1, search=search_query) }}" class="pagination-item">>></a>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Скрытая форма для серверного поиска при использовании пагинации -->
+<form action="{{ url_for('users') }}" method="get" id="server-search-form" style="display:none;">
+    <input type="hidden" name="search" id="server-search-input" value="{{ search_query or '' }}">
+    <input type="hidden" name="page" id="server-page-input" value="1">
+</form>
+{% endblock %}

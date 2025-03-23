@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+
+{% block title %}Панель управления | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<h1>Панель управления</h1>
+
+<div class="row">
+    <div class="col">
+        <div class="panel">
+            <div class="panel-header">Пользователи</div>
+            <div class="panel-body" style="text-align: center;">
+                <h2>{{ total_users }}</h2>
+                <p>Активных: {{ active_users }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="panel">
+            <div class="panel-header">Темы</div>
+            <div class="panel-body" style="text-align: center;">
+                <h2>{{ total_subjects }}</h2>
+                <p>Всего тем</p>
+            </div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="panel">
+            <div class="panel-header">Статус бота</div>
+            <div class="panel-body" style="text-align: center;">
+                {% if bot_status and bot_status.running %}
+                <div><span class="status-indicator status-active"></span> Работает</div>
+                <p>Время работы: {{ bot_status.uptime|default('0:00:00') }}</p>
+                {% else %}
+                <div><span class="status-indicator status-inactive"></span> Неактивен</div>
+                <p>Время работы: -</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Управление системой</div>
+    <div class="panel-body">
+        <p>Используйте панель слева для навигации по разделам.</p>
+        <div style="margin: 20px 0; display: flex; gap: 10px; flex-wrap: wrap;">
+            <a href="{{ url_for('users') }}" class="btn btn-primary">Пользователи</a>
+            <a href="{{ url_for('add_user') }}" class="btn btn-primary">Добавить пользователя</a>
+            <a href="{{ url_for('sql_console') }}" class="btn btn-primary">SQL - Консоль</a>
+            <a href="{{ url_for('bot_status') }}" class="btn btn-primary">Статус бота</a>
+        </div>
+        
+        <h2>Чаво</h2>
+        <p>Если вы впервые используете данный веб-интерфейс, прочитайте справку.</p>
+        <a href="{{ url_for('help') }}" class="btn btn-primary" style="margin-top: 10px;">Справка</a>
+    </div>
+</div>
+{% endblock %}

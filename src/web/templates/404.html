@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Страница не найдена | DEERAY TG BOT</title>
+    
+    <!-- SVG favicon -->
+    <link rel="icon" href="{{ url_for('static', filename='img/logo_deeray.svg') }}" type="image/svg+xml">
+    <!-- Fallback favicon.ico for older browsers -->
+    <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}" sizes="any">
+    <!-- Apple Touch Icon -->
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png') }}">
+    <!-- Android/Chrome icons -->
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+    <!-- Theme color for browser UI -->
+    <meta name="theme-color" content="#262626">
+    
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/normalize.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="error-container">
+        <div class="logo-container">
+            <img src="{{ url_for('static', filename='img/deeraay_logo.svg') }}" alt="DEERAY" class="logo-image">
+            <div class="logo-text">
+                <div>DEERAY</div>
+                <div>TG BOT</div>
+            </div>
+        </div>
+        
+        <div class="error-content">
+            <h1>404</h1>
+            <h2>Страница не найдена</h2>
+            <p>Запрошенная страница не существует или была перемещена.</p>
+            <a href="{{ url_for('index') }}" class="btn btn-primary">Вернуться на главную</a>
+        </div>
+    </div>
+</body>
+</html>

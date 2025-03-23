@@ -1,0 +1,134 @@
+{% extends 'base.html' %}
+
+{% block title %}SQL-Консоль | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>SQL - Консоль</h1>
+    <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> На главную
+    </a>
+</div>
+
+<div class="row">
+    <div class="col" style="flex: 0 0 30%;">
+        <div class="panel">
+            <div class="panel-header">Структура БД</div>
+            <div class="panel-body">
+                {% for table in tables %}
+                <div class="db-table-structure">
+                    <div class="db-table-header">
+                        <span class="table-name">{{ table }}</span>
+                        <span class="toggle-icon">▼</span>
+                    </div>
+                    <div id="columns-{{ table }}" class="db-table-columns">
+                        {% for column in table_info.get(table, []) %}
+                        <div class="db-column" data-table="{{ table }}" data-column="{{ column.name }}">
+                            {{ column.name }} ({{ column.type }})
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+        
+        <div class="panel" style="margin-top: 20px;">
+            <div class="panel-header">Готовые запросы</div>
+            <div class="panel-body">
+                <div class="query-list">
+                    {% for name, query in common_queries.items() %}
+                    <div class="query-item" data-query="{{ query }}">{{ name }}</div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col" style="flex: 0 0 70%;">
+        <form method="post" action="{{ url_for('sql_console') }}" id="sql-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="panel">
+                <div class="panel-header">SQL - запрос</div>
+                <div class="panel-body">
+                    <textarea name="query" class="form-control sql-editor" style="height: 150px;">{{ query }}</textarea>
+                    <div class="sql-tip">Для выполнения запроса используйте Ctrl+Enter или нажмите кнопку ниже</div>
+                    <button type="submit" class="btn btn-primary execute-btn">
+                        <span>▶</span> Выполнить
+                    </button>
+                </div>
+            </div>
+        </form>
+        
+        {% if results or error %}
+        <div id="results-panel" class="panel results-panel" style="margin-top: 20px;">
+            <div class="panel-header">
+                Результаты
+            </div>
+            <div class="panel-body">
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+                
+                {% if results %}
+                <div class="search-container">
+                    <input type="text" class="search-input" placeholder="Поиск по результатам..." value="{{ search_query or '' }}">
+                    <div class="search-controls">
+                        <button type="button" class="btn search-btn">Поиск</button>
+                        <button type="button" class="btn clear-btn">Очистить</button>
+                        <div class="results-counter">Найдено: {{ total_results }}</div>
+                    </div>
+                </div>
+                
+                <div class="table-responsive">
+                    <table class="results-table">
+                        <thead>
+                            <tr>
+                                {% for header in headers %}
+                                <th>{{ header }}</th>
+                                {% endfor %}
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in results %}
+                            <tr>
+                                {% for header in headers %}
+                                <td>{{ row[header] }}</td>
+                                {% endfor %}
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                {% if total_pages > 1 %}
+                <div class="pagination">
+                    {% if page > 1 %}
+                    <a href="{{ url_for('sql_console', page=page-1, search=search_query, query=query) }}" class="pagination-item"><<</a>
+                    {% endif %}
+                    
+                    {% for i in range(1, total_pages + 1) %}
+                    <a href="{{ url_for('sql_console', page=i, search=search_query, query=query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+                    {% endfor %}
+                    
+                    {% if page < total_pages %}
+                    <a href="{{ url_for('sql_console', page=page+1, search=search_query, query=query) }}" class="pagination-item">>></a>
+                    {% endif %}
+                </div>
+                <div class="pagination-info">Страница {{ page }} из {{ total_pages }}</div>
+                {% endif %}
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- Скрытая форма для серверного поиска -->
+<form action="{{ url_for('sql_console') }}" method="get" id="server-search-form" style="display:none;">
+    <input type="hidden" name="search" id="server-search-input" value="{{ search_query or '' }}">
+    <input type="hidden" name="page" id="server-page-input" value="1">
+    {% if query %}
+    <input type="hidden" name="query" value="{{ query }}">
+    {% endif %}
+</form>
+{% endblock %}

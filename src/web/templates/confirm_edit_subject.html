@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+
+{% block title %}Подтверждение действия | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Подтверждение действия</h1>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Дублирование темы</div>
+    <div class="panel-body">
+        <div class="alert alert-warning">
+            Тема '{{ new_subject }}' уже существует у другого пользователя. Вы хотите продолжить?
+        </div>
+        <form method="post" action="{{ url_for('edit_subject', chat_id=chat_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="old_subject" value="{{ old_subject }}">
+            <input type="hidden" name="new_subject" value="{{ new_subject }}">
+            <input type="hidden" name="confirm_duplicate" value="true">
+            <div class="buttons-container">
+                <button type="submit" class="btn btn-warning">Да, продолжить</button>
+                <a href="{{ url_for('user_details', chat_id=chat_id) }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

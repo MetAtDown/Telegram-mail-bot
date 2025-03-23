@@ -1,0 +1,28 @@
+{% extends 'base.html' %}
+
+{% block title %}Подтверждение действия | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Подтверждение действия</h1>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Дублирование тем</div>
+    <div class="panel-body">
+        <div class="alert alert-warning">
+            Следующие темы уже существуют у других пользователей: {{ duplicate_subjects|join(', ') }}.<br>
+            Вы хотите продолжить и добавить все темы?
+        </div>
+        <form method="post" action="{{ url_for('add_subjects_bulk', chat_id=chat_id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="subjects_bulk" value="{{ subjects_text }}">
+            <input type="hidden" name="confirm_duplicate_subjects" value="true">
+            <div class="buttons-container">
+                <button type="submit" class="btn btn-warning">Да, продолжить</button>
+                <a href="{{ url_for('user_details', chat_id=chat_id) }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Вход | DEERAY TG BOT</title>
+    
+    <!-- SVG favicon -->
+    <link rel="icon" href="{{ url_for('static', filename='img/logo_deeray.svg') }}" type="image/svg+xml">
+    <!-- Fallback favicon.ico for older browsers -->
+    <link rel="icon" href="{{ url_for('static', filename='img/favicon.ico') }}" sizes="any">
+    <!-- Apple Touch Icon -->
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png') }}">
+    <!-- Android/Chrome icons -->
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+    <!-- Theme color for browser UI -->
+    <meta name="theme-color" content="#262626">
+    
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@100;300;400;500;700;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/normalize.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/styles.css') }}">
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-header">
+            <div class="logo-container">
+                <img src="{{ url_for('static', filename='img/deeraay_logo.svg') }}" alt="DEERAY" class="logo-image">
+                <div class="logo-text">
+                    <div>DEERAY</div>
+                    <div>TG BOT</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="login-panel">
+            <h1>Вход в систему</h1>
+            
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div class="flash-messages">
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ category }}">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+            
+            <form action="{{ url_for('login') }}" method="post" class="login-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label class="form-label">Имя пользователя</label>
+                    <input type="text" name="username" class="form-control" placeholder="Введите имя пользователя" required>
+                </div>
+                
+                <div class="form-group">
+                    <label class="form-label">Пароль</label>
+                    <input type="password" name="password" class="form-control" placeholder="Введите пароль" required>
+                </div>
+                
+                <button type="submit" class="btn btn-primary btn-login">Войти</button>
+            </form>
+        </div>
+        
+        <div class="login-footer">
+            <div class="logo-container">
+                <img src="{{ url_for('static', filename='img/deeraay_logo.svg') }}" alt="DEERAY" class="logo-small">
+                <div class="footer-text">DEERAY PRODUCTION</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,22 @@
+<div class="sidebar">
+    <ul class="nav-menu">
+        <li class="nav-item {% if request.endpoint == 'index' %}active{% endif %}">
+            <a href="{{ url_for('index') }}">Главная</a>
+        </li>
+        <li class="nav-item {% if request.endpoint == 'users' %}active{% endif %}">
+            <a href="{{ url_for('users') }}">Пользователи</a>
+        </li>
+        <li class="nav-item {% if request.endpoint == 'add_user' %}active{% endif %}">
+            <a href="{{ url_for('add_user') }}">Добавить пользователя</a>
+        </li>
+        <li class="nav-item {% if request.endpoint == 'bot_status' %}active{% endif %}">
+            <a href="{{ url_for('bot_status') }}">Статус бота</a>
+        </li>
+        <li class="nav-item {% if request.endpoint == 'sql_console' %}active{% endif %}">
+            <a href="{{ url_for('sql_console') }}">SQL-Консоль</a>
+        </li>
+        <li class="nav-item {% if request.endpoint == 'help' %}active{% endif %}">
+            <a href="{{ url_for('help') }}">Справка</a>
+        </li>
+    </ul>
+</div>

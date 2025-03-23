@@ -1,0 +1,13 @@
+<div class="header">
+    <div class="logo-container">
+        <img src="{{ url_for('static', filename='img/deeraay_logo.svg') }}" alt="DEERAY" class="logo-image">
+        <div class="logo-text">
+            <div>DEERAY</div>
+            <div>TG BOT</div>
+        </div>
+    </div>
+    <div class="auth-controls">
+        <a href="#" class="auth-link">{{ session.username }}</a>
+        <a href="{{ url_for('logout') }}" class="auth-link logout-btn">Выйти</a>
+    </div>
+</div>

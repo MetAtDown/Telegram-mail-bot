@@ -1,0 +1,83 @@
+{% extends 'base.html' %}
+
+{% block title %}Добавить пользователя | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Добавить нового пользователя</h1>
+    <a href="{{ url_for('users') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> Назад к списку
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Новый пользователь</div>
+    <div class="panel-body">
+        {% if user_exists %}
+        <div class="alert alert-warning">
+            Пользователь с Chat ID {{ chat_id }} уже существует! Вы хотите перезаписать его?
+        </div>
+        <form method="post" action="{{ url_for('add_user') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+            <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
+            <input type="hidden" name="subjects" value="{{ subjects }}">
+            <input type="hidden" name="confirm_overwrite" value="true">
+            <div class="buttons-container">
+                <button type="submit" class="btn btn-warning">Да, перезаписать</button>
+                <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+        {% elif duplicate_subjects %}
+        <div class="alert alert-warning">
+            Некоторые темы уже существуют у других пользователей. Вы хотите продолжить?
+        </div>
+        <form method="post" action="{{ url_for('add_user') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="chat_id" value="{{ chat_id }}">
+            <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
+            <input type="hidden" name="subjects" value="{{ subjects }}">
+            <input type="hidden" name="confirm_duplicate_subjects" value="true">
+            <div class="buttons-container">
+                <button type="submit" class="btn btn-warning">Да, продолжить</button>
+                <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+        {% else %}
+        <form method="post" action="{{ url_for('add_user') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            
+            <div class="form-group">
+                <label class="form-label">Chat ID пользователя</label>
+                <input type="text" name="chat_id" class="form-control" placeholder="Введите Chat ID" required pattern="[0-9]+" value="{{ chat_id|default('') }}">
+                <div class="hint-text">Только цифры, без пробелов и других символов</div>
+            </div>
+            
+            <div class="form-group">
+    <label class="form-label">Статус уведомлений</label>
+    <div class="radio-group">
+        <label class="radio-label radio-active">
+            <input type="radio" name="status" value="enable" checked style="display: none;">
+            <span class="radio-custom"></span>
+            Включены
+        </label>
+        <label class="radio-label">
+            <input type="radio" name="status" value="disable" style="display: none;">
+            <span class="radio-custom"></span>
+            Отключены
+        </label>
+    </div>
+</div>
+            
+            <div class="form-group">
+                <label class="form-label">Темы (каждая с новой строки)</label>
+                <textarea name="subjects" class="form-control" rows="6">{{ subjects|default('') }}</textarea>
+                <div class="hint-text">Можно оставить пустым и добавить темы позже</div>
+            </div>
+            
+            <button type="submit" class="btn btn-primary">Добавить пользователя</button>
+        </form>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
