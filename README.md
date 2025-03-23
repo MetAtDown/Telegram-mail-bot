@@ -25,7 +25,7 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone git clone https://github.com/MetAtDown/Telegram-mail-bot.git
+   git clone https://github.com/MetAtDown/Telegram-mail-bot.git
    cd Telegram-mail-bot
    ```
 
