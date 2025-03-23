@@ -25,43 +25,51 @@
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/username/email-telegram-forwarder.git
-   cd email-telegram-forwarder
+   git clone git clone https://github.com/MetAtDown/Telegram-mail-bot.git
+   cd Telegram-mail-bot
    ```
 
 2. Создайте виртуальное окружение (рекомендуется для работы `scripts\:` `win_start_system.bat` or `linux_start_system.sh`):
    ```bash
-   python -m venv venv
-   source venv/bin/activate  # Для Linux/Mac
-   # или
-   venv\Scripts\activate     # Для Windows
+   python -m venv .venv
    ```
+   
+   
+      win активация окружения:
+      ```
+      source .venv/Scripts/activate
+      ```
+      linux активация окружения:
+      ```
+      source .venv/bin/activate
+      ```
 
-3. Установите зависимости:
+
+4. Установите зависимости:
    ```bash
    pip install -r requirements.txt
    ```
 
-4. Создайте файл `.env` в корне проекта:
+5. Создайте файл `.env` в корне проекта:
    ```
    # Database settings
-   DATABASE_PATH=data/email_bot.db
+   DATABASE_PATH=data/email_bot.db # Можно оставить как есть
    
    # Email settings
-   EMAIL_ACCOUNT=example@yandex.ru
-   EMAIL_PASSWORD=imap-pass
+   EMAIL_ACCOUNT=example@yandex.ru # Почта на которой будут проверяться письма
+   EMAIL_PASSWORD=imap-pass # Пароль не от самой почты, а от imap доступа к этой почте
    
    # Telegram settings
-   TELEGRAM_TOKEN=your-telegram-bot-token
+   TELEGRAM_TOKEN=your-telegram-bot-token # токен бота
 
    # Web admin settings
-   ADMIN_USERNAME=log-admin
-   ADMIN_PASSWORD=log-pass
-   SECRET_KEY=random-secret-key
+   ADMIN_USERNAME=log-admin # логин для входа в админку
+   ADMIN_PASSWORD=log-pass # пароль для входа в админку 
+   SECRET_KEY=random-secret-key # secret key
    
    # System settings
-   LOG_LEVEL=INFO, ERROR, WARNING, DEBUG # (choose one)
-   CHECK_INTERVAL= 5 # how many minutes between checks
+   LOG_LEVEL=INFO # Можно также выбрать ERROR, WARNING, DEBUG
+   CHECK_INTERVAL=5 # Интервал проверки почты, тестировался на 5 мин.
    ```
 
 
@@ -75,8 +83,12 @@ python run_tools.py --help
 ```bash
 python run_tools.py system start
 ```
+После запуска все нужные файлы создадутся автоматически (см. структура проекта)
 
-Веб-интерфейс администратора будет доступен по адресу: `http://localhost:5000`
+Веб-интерфейс администратора будет доступен по адресу: 
+```
+http://localhost:5000
+```
 
 ## Использование
 
