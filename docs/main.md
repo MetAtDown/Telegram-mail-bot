@@ -122,22 +122,24 @@
 3. **Создание файла конфигурации**
    Создайте файл `.env` в корне проекта со следующими параметрами:
    ```
-   # Настройки электронной почты
-   EMAIL_ACCOUNT=your-email@yandex.ru
-   EMAIL_PASSWORD=your-email-password
-   EMAIL_SERVER=imap.yandex.ru
-   CHECK_INTERVAL=5  # в минутах
-   
-   # Настройки Telegram
-   TELEGRAM_TOKEN=your-telegram-bot-token
-   
-   # Интерфейс администратора
-   ADMIN_USERNAME=admin
-   ADMIN_PASSWORD=secure-password
-   SECRET_KEY=random-secret-key
-   
-   # База данных (опционально, по умолчанию data/email_bot.db)
-   DATABASE_PATH=data/email_bot.db
+   # Database settings
+    DATABASE_PATH=data/email_bot.db # Можно оставить как есть
+    
+    # Email settings
+    EMAIL_ACCOUNT=example@yandex.ru # Почта на которой будут проверяться письма
+    EMAIL_PASSWORD=imap-pass # Пароль не от самой почты, а от imap доступа к этой почте
+    
+    # Telegram settings
+    TELEGRAM_TOKEN=your-telegram-bot-token # токен бота
+    
+    # Web admin settings
+    ADMIN_USERNAME=log-admin # логин для входа в админку
+    ADMIN_PASSWORD=log-pass # пароль для входа в админку 
+    SECRET_KEY=random-secret-key # secret key
+    
+    # System settings
+    LOG_LEVEL=INFO # Можно также выбрать ERROR, WARNING, DEBUG
+    CHECK_INTERVAL=5 # Интервал проверки почты, тестировался на 5 мин.
    ```
 
 4. **Инициализация базы данных**
