@@ -506,7 +506,7 @@ class EmailTelegramForwarder:
 
     def format_email_body(self, body: str, content_type: str) -> str:
         """
-        Форматирование тела письма для отправки в Telegram с оптимизацией.
+        Форматирование тела письма для отправки в Telegram без Markdown.
 
         Args:
             body: Тело письма
@@ -516,49 +516,39 @@ class EmailTelegramForwarder:
             Отформатированное тело письма
         """
         try:
-            # Если содержимое в HTML, извлекаем текст и ссылки
+            # Если содержимое в HTML
             if content_type == "text/html":
                 # Используем lxml парсер для быстрой работы
                 soup = BeautifulSoup(body, 'lxml')
 
-                # Удаляем ненужные элементы, которые могут мешать чтению
+                # Удаляем ненужные элементы
                 for tag in soup(['style', 'script', 'meta', 'link']):
                     tag.decompose()
 
-                # Сохраняем все ссылки
-                links = {}
-                for a_tag in soup.find_all('a', href=True):
-                    href = a_tag['href']
-                    text = a_tag.get_text().strip()
-                    # Пропускаем пустые ссылки и ссылки без текста
-                    if href and text:
-                        links[text] = href
-
-                # Заменяем некоторые теги для лучшего форматирования в Markdown
-                for tag_name, replacement in [
-                    ('h1', '# '), ('h2', '## '), ('h3', '### '),
-                    ('br', '\n'), ('p', '\n\n'), ('div', '\n')
-                ]:
-                    for tag in soup.find_all(tag_name):
-                        if tag.string:  # Только если тег содержит текст
-                            tag.insert_before(replacement)
-
                 # Получаем текст из HTML
-                body = soup.get_text('\n', strip=True)
+                clean_text = soup.get_text('\n', strip=True)
+
+                # Заменяем экранированные переносы строк
+                clean_text = clean_text.replace('\\n', '\n')
+
+                # Удаляем HTML теги <p></p>
+                clean_text = re.sub(r'<p></p>', '\n', clean_text)
 
                 # Удаляем множественные переносы строк
-                body = re.sub(r'\n{3,}', '\n\n', body)
+                clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
 
-                # Заменяем текст ссылками в формате Markdown для Telegram
-                # Сортируем ссылки по длине текста (от длинных к коротким)
-                # чтобы избежать проблем с подстроками
-                for text, href in sorted(links.items(), key=lambda x: len(x[0]), reverse=True):
-                    # Проверяем, что текст ссылки присутствует в теле письма
-                    if text in body:
-                        body = body.replace(text, f"[{text}]({href})", 1)
+                # Заменяем метки "MetaData" и "Summary" на пустую строку
+                clean_text = clean_text.replace('MetaData', '')
+                clean_text = clean_text.replace('Summary', '')
+
+                # Форматируем структурированные данные
+                clean_text = re.sub(r'- Задействовано:', '\n- Задействовано:', clean_text)
+                clean_text = re.sub(r'- Не задействовано:', '\n- Не задействовано:', clean_text)
+
+                return clean_text
 
             # Обрезаем текст до допустимой длины
-            max_length = 3900  # Оставляем запас для остальной части сообщения
+            max_length = 3900
             if len(body) > max_length:
                 body = body[:max_length] + "...(сообщение обрезано)"
 
@@ -632,64 +622,80 @@ class EmailTelegramForwarder:
 
     def send_to_telegram(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
         """
-        Отправка данных письма в Telegram с повторными попытками и ограничением частоты.
+        Отправка данных письма в Telegram, объединяя компоненты в одно сообщение где возможно.
         """
         # Проверяем ограничение частоты
         if not self._check_rate_limit(chat_id):
             threading.Timer(60.0, self.send_to_telegram, args=[chat_id, email_data]).start()
             return False
 
-        for attempt in range(MAX_RETRIES):
+        try:
+            # Форматируем тело письма
+            body = self.format_email_body(email_data["body"], email_data["content_type"])
+
+            # Создаем заголовок
+            header = (
+                f"📧 Новое письмо\n\n"
+                f"От: {email_data['from']}\n"
+                f"Тема: {email_data['subject']}\n"
+                f"Дата: {email_data['date']}\n\n"
+            )
+
+            # Объединяем заголовок и тело в одно сообщение
+            combined_message = header + body
+
+            # Проверяем наличие вложений
+            has_attachments = "attachments" in email_data and email_data["attachments"] and len(
+                email_data["attachments"]) > 0
+
+            # Если нет вложений, отправляем весь текст как одно сообщение (или разбитое на части)
+            if not has_attachments:
+                # Разбиваем текст на части по 4096 символов (максимальный размер сообщения Telegram)
+                message_parts = self.split_text(combined_message, max_length=4096)
+
+                # Отправляем каждую часть
+                for part in message_parts:
+                    self.bot.send_message(chat_id, part)
+                    time.sleep(0.5)  # Задержка между отправками
+            else:
+                # Если есть вложения, отправляем первое вложение вместе с текстом
+                first_attachment = email_data["attachments"][0]
+
+                # Ограничиваем длину caption до 1024 символов (максимум для caption в Telegram)
+                if len(combined_message) > 1024:
+                    # Отправляем полный текст отдельно
+                    message_parts = self.split_text(combined_message, max_length=4096)
+                    for part in message_parts:
+                        self.bot.send_message(chat_id, part)
+                        time.sleep(0.5)  # Задержка между отправками
+
+                    # Затем отправляем все вложения
+                    for attachment in email_data["attachments"]:
+                        self.send_attachment_to_telegram(chat_id, attachment)
+                        time.sleep(0.5)  # Задержка между вложениями
+                else:
+                    # Отправляем первое вложение с текстом как caption
+                    self.send_attachment_with_message(chat_id, first_attachment, combined_message)
+
+                    # Отправляем оставшиеся вложения (если есть)
+                    for attachment in email_data["attachments"][1:]:
+                        self.send_attachment_to_telegram(chat_id, attachment)
+                        time.sleep(0.5)  # Задержка между вложениями
+
+            logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Ошибка при отправке сообщения в Telegram: {e}")
+            # Пробуем отправить упрощенное сообщение в случае ошибки
             try:
-                # Форматируем тело письма
-                body = self.format_email_body(email_data["body"], email_data["content_type"])
-
-                # Создаем сообщение
-                message = (
-                    f"📧 Новое письмо\n\n"
-                    f"От: {email_data['from']}\n"
-                    f"Тема: {email_data['subject']}\n"
-                    f"Дата: {email_data['date']}\n\n"
-                    f"{body}"
-                )
-
-                # Проверяем наличие вложений
-                has_attachments = "attachments" in email_data and email_data["attachments"]
-
-                if not has_attachments:
-                    # Отправляем обычное сообщение без вложений
-                    self.bot.send_message(chat_id, message, parse_mode="Markdown")
-                    logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
-                else:
-                    # Если есть ровно одно вложение, отправляем его с текстом сообщения как caption
-                    if len(email_data["attachments"]) == 1:
-                        self.send_attachment_with_message(chat_id, email_data["attachments"][0], message)
-                    else:
-                        # Отправляем первое вложение с сообщением как caption
-                        self.send_attachment_with_message(chat_id, email_data["attachments"][0], message)
-
-                        # Отправляем остальные вложения без текста
-                        for attachment in email_data["attachments"][1:]:
-                            self.send_attachment_to_telegram(chat_id, attachment)
-
+                simple_message = f"📧 Новое письмо\n\nТема: {email_data['subject']}"
+                self.bot.send_message(chat_id, simple_message)
+                logger.info(f"Отправлено упрощенное сообщение в чат {chat_id}")
                 return True
-
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = RETRY_DELAY * (2 ** attempt)
-                    logger.warning(
-                        f"Попытка {attempt + 1} отправки сообщения не удалась: {e}. Повторяем через {wait_time}с...")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Ошибка отправки сообщения в Telegram после {MAX_RETRIES} попыток: {e}")
-                    try:
-                        simple_message = f"📧 Новое письмо\n\nТема: {email_data['subject']}"
-                        self.bot.send_message(chat_id, simple_message)
-                        logger.info(f"Отправлено упрощенное сообщение в чат {chat_id}")
-                        return True
-                    except Exception as e2:
-                        logger.error(f"Критическая ошибка отправки: {e2}")
-                        return False
+            except Exception as e2:
+                logger.error(f"Критическая ошибка отправки: {e2}")
+                return False
 
     def send_attachment_with_message(self, chat_id: str, attachment: Dict[str, Any], message: str) -> None:
         """
@@ -721,7 +727,7 @@ class EmailTelegramForwarder:
             file_size = os.path.getsize(temp_file_path)
             if file_size > 50 * 1024 * 1024:
                 logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ)")
-                self.bot.send_message(chat_id, message, parse_mode="Markdown")
+                self.bot.send_message(chat_id, message)  # Убрали parse_mode
                 self.bot.send_message(chat_id, f"⚠️ Вложение {safe_filename} слишком большое для отправки в Telegram")
                 return
 
@@ -735,10 +741,10 @@ class EmailTelegramForwarder:
                 try:
                     if content_type.startswith('image/'):
                         with open(temp_file_path, 'rb') as photo:
-                            self.bot.send_photo(chat_id, photo, caption=truncated_message, parse_mode="Markdown")
+                            self.bot.send_photo(chat_id, photo, caption=truncated_message)  # Убрали parse_mode
                     else:
                         with open(temp_file_path, 'rb') as document:
-                            self.bot.send_document(chat_id, document, caption=truncated_message, parse_mode="Markdown")
+                            self.bot.send_document(chat_id, document, caption=truncated_message)  # Убрали parse_mode
                     break
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
@@ -749,7 +755,7 @@ class EmailTelegramForwarder:
                     else:
                         logger.error(f"Не удалось отправить вложение с сообщением после {MAX_RETRIES} попыток: {e}")
                         try:
-                            self.bot.send_message(chat_id, message, parse_mode="Markdown")
+                            self.bot.send_message(chat_id, message)  # Убрали parse_mode
                             # Резервная отправка вложения
                             if content_type.startswith('image/'):
                                 with open(temp_file_path, 'rb') as photo:
@@ -763,7 +769,7 @@ class EmailTelegramForwarder:
         except Exception as e:
             logger.error(f"Ошибка при отправке вложения с сообщением: {e}")
             try:
-                self.bot.send_message(chat_id, message, parse_mode="Markdown")
+                self.bot.send_message(chat_id, message)  # Убрали parse_mode
             except Exception as e3:
                 logger.error(f"Не удалось отправить даже текст сообщения: {e3}")
         finally:
@@ -779,9 +785,23 @@ class EmailTelegramForwarder:
                 except Exception as e:
                     logger.warning(f"Не удалось удалить временную директорию {temp_dir}: {e}")
 
+    def split_text(self, text: str, max_length: int = 4096) -> List[str]:
+        """Разбивает текст на части по заданной максимальной длине."""
+        parts = []
+        while len(text) > max_length:
+            # Ищем последнее место разрыва перед max_length
+            split_at = text.rfind('\n', 0, max_length)
+            if split_at == -1:  # Если нет переноса строки, разбиваем по max_length
+                split_at = max_length
+            parts.append(text[:split_at])
+            text = text[split_at:].lstrip()  # Убираем лишние пробелы в начале
+        if text:  # Добавляем остаток текста
+            parts.append(text)
+        return parts
+
     def send_attachment_to_telegram(self, chat_id: str, attachment: Dict[str, Any]) -> None:
         """
-        Отправка вложения в Telegram с сохранением имени файла и расширения.
+        Отправка вложения в Telegram с сохранением имени файла и учетом лимита caption.
         """
         temp_dir = None
         temp_file_path = None
@@ -793,11 +813,10 @@ class EmailTelegramForwarder:
 
             # Очищаем имя файла от недопустимых символов
             safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+            caption = safe_filename[:1024]  # Ограничиваем caption до 1024 символов
 
             # Создаем временную директорию
             temp_dir = tempfile.mkdtemp()
-
-            # Создаем файл с оригинальным именем во временной директории
             temp_file_path = os.path.join(temp_dir, safe_filename)
 
             with open(temp_file_path, 'wb') as temp_file:
@@ -809,18 +828,18 @@ class EmailTelegramForwarder:
             file_size = os.path.getsize(temp_file_path)
             if file_size > 50 * 1024 * 1024:
                 logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ), пропускаем")
-                self.bot.send_message(chat_id, f"⚠️ Вложение {safe_filename} слишком большое для отправки в Telegram")
+                self.bot.send_message(chat_id, f"⚠️ Вложение {safe_filename} слишком большое для отправки")
                 return
 
             for attempt in range(MAX_RETRIES):
                 try:
                     if content_type.startswith('image/'):
                         with open(temp_file_path, 'rb') as photo:
-                            self.bot.send_photo(chat_id, photo, caption=safe_filename)
+                            self.bot.send_photo(chat_id, photo, caption=caption)
                         logger.info(f"Изображение {filename} отправлено в чат {chat_id}")
                     else:
                         with open(temp_file_path, 'rb') as document:
-                            self.bot.send_document(chat_id, document, caption=safe_filename)
+                            self.bot.send_document(chat_id, document, caption=caption)
                         logger.info(f"Документ {filename} отправлен в чат {chat_id}")
                     break
                 except Exception as e:
@@ -831,10 +850,7 @@ class EmailTelegramForwarder:
                         time.sleep(wait_time)
                     else:
                         logger.error(f"Не удалось отправить вложение {filename} после {MAX_RETRIES} попыток: {e}")
-                        try:
-                            self.bot.send_message(chat_id, f"⚠️ Не удалось отправить вложение: {safe_filename}")
-                        except Exception:
-                            pass
+                        self.bot.send_message(chat_id, f"⚠️ Не удалось отправить вложение: {safe_filename}")
 
         except Exception as e:
             logger.error(f"Ошибка при отправке вложения {attachment.get('filename', 'неизвестно')}: {e}")
