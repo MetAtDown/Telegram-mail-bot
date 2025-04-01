@@ -12,7 +12,8 @@ import queue
 from functools import lru_cache
 from typing import Dict, List, Tuple, Any, Optional, Set
 from email.header import decode_header
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString
+import html
 from collections import defaultdict
 
 from src.config import settings
@@ -505,57 +506,73 @@ class EmailTelegramForwarder:
             return original_subject
 
     def format_email_body(self, body: str, content_type: str) -> str:
-        """
-        Форматирование тела письма для отправки в Telegram без Markdown.
-
-        Args:
-            body: Тело письма
-            content_type: MIME-тип содержимого
-
-        Returns:
-            Отформатированное тело письма
-        """
+        logger.debug(f"Форматирование тела (метод BS + URL). Content-Type: {content_type}. Длина: {len(body)}")
+        clean_text = ""
         try:
             # Если содержимое в HTML
             if content_type == "text/html":
-                # Используем lxml парсер для быстрой работы
-                soup = BeautifulSoup(body, 'lxml')
+                # Раскодируем HTML-сущности
+                try:
+                    unescaped_body = html.unescape(body)
+                except Exception as ue:
+                    logger.error(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
+                    unescaped_body = body
 
-                # Удаляем ненужные элементы
-                for tag in soup(['style', 'script', 'meta', 'link']):
+                # Парсим HTML
+                try:
+                    soup = BeautifulSoup(unescaped_body, 'lxml')
+                except ImportError:
+                    soup = BeautifulSoup(unescaped_body, 'html.parser')
+
+                # Удаляем ненужные теги
+                for tag in soup(['script', 'style', 'meta', 'link', 'th']):
                     tag.decompose()
 
-                # Получаем текст из HTML
-                clean_text = soup.get_text('\n', strip=True)
+                # Обрабатываем ссылки
+                for link_tag in soup.find_all('a', href=True):
+                    href = link_tag.get('href', '')
+                    link_text = link_tag.get_text(separator=' ', strip=True)
+                    if href:
+                        if not link_text:
+                            link_text = href
+                        replacement_node = NavigableString(f"{link_text}\n{href}")
+                        link_tag.replace_with(replacement_node)
+                    else:
+                        link_tag.replace_with(NavigableString(link_text))
 
-                # Заменяем экранированные переносы строк
-                clean_text = clean_text.replace('\\n', '\n')
+                # Замена <br> на перенос строки
+                for br in soup.find_all('br'):
+                    br.replace_with(NavigableString('\n'))
 
-                # Удаляем HTML теги <p></p>
-                clean_text = re.sub(r'<p></p>', '\n', clean_text)
+                # Замена <p> на текст с двойным переносом в конце
+                for p in soup.find_all('p'):
+                    p_content = p.get_text()
+                    p.replace_with(NavigableString(p_content + '\n\n'))
 
-                # Удаляем множественные переносы строк
+                # Получаем текст и очищаем излишние переносы
+                clean_text = soup.get_text()
+                clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
+
+            elif content_type == "text/plain":
+                clean_text = body.strip()
                 clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+            else:
+                logger.warning(f"Обработка неизвестного content_type: {content_type}. Оставляем как есть.")
+                clean_text = body
 
-                # Заменяем метки "MetaData" и "Summary" на пустую строку
-                clean_text = clean_text.replace('MetaData', '')
-                clean_text = clean_text.replace('Summary', '')
+            # Обрезаем если слишком длинно
+            max_length = 4050
+            if len(clean_text) > max_length:
+                cut_pos = clean_text.rfind('\n', 0, max_length)
+                if cut_pos == -1 or max_length - cut_pos > 1000:
+                    cut_pos = max_length
+                clean_text = clean_text[:cut_pos] + "\n\n...(сообщение обрезано)"
 
-                # Форматируем структурированные данные
-                clean_text = re.sub(r'- Задействовано:', '\n- Задействовано:', clean_text)
-                clean_text = re.sub(r'- Не задействовано:', '\n- Не задействовано:', clean_text)
-
-                return clean_text
-
-            # Обрезаем текст до допустимой длины
-            max_length = 3900
-            if len(body) > max_length:
-                body = body[:max_length] + "...(сообщение обрезано)"
-
-            return body
+            return clean_text
         except Exception as e:
-            logger.error(f"Ошибка форматирования тела письма: {e}")
-            return "⚠ Ошибка обработки содержимого письма"
+            logger.error(f"Критическая ошибка в format_email_body: {e}", exc_info=True)
+            truncated_body = body[:1000] + "..." if len(body) > 1000 else body
+            return f"⚠ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
     def check_subject_match(self, email_subject: str) -> List[Tuple[str, str]]:
         """
