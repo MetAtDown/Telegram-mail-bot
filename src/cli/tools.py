@@ -605,144 +605,118 @@ def stop_web_interface() -> bool:
         return False
 
 
-def start_bot(restart: bool = False) -> bool:
-    try:
-        # Проверяем, не запущен ли уже бот
-        bot_process = find_process_by_name('system.py')
-        if bot_process and not restart:
-            logger.info("Бот уже запущен")
-            return True
-
-        # Если нужен перезапуск, останавливаем текущий процесс
-        if bot_process and restart:
-            safely_terminate_process(bot_process['pid'])
-            time.sleep(1)  # Даем процессу время на завершение
-
-        # Находим файл бота
-        bot_script = Path(__file__).parent.parent / 'core' / 'system.py'
-        if not bot_script.exists():
-            bot_script = Path('src') / 'core' / 'system.py'
-            if not bot_script.exists():
-                logger.error("Файл бота не найден")
-                return False
-
-        # Настраиваем аргументы запуска для полного отсоединения процесса
-        kwargs = {}
-        if os.name != 'nt':  # На Unix-подобных системах
-            kwargs.update(
-                start_new_session=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                close_fds=True
-            )
-        else:  # На Windows
-            from subprocess import DETACHED_PROCESS
-            kwargs.update(
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                stdin=subprocess.DEVNULL,
-                creationflags=DETACHED_PROCESS
-            )
-
-        process = subprocess.Popen(['python', str(bot_script)], **kwargs)
-
-        # Остальной код без изменений
-        for _ in range(10):
-            time.sleep(PROCESS_CHECK_INTERVAL)
-            if psutil.pid_exists(process.pid) and process.poll() is None:
-                pid_file = Path(settings.DATA_DIR) / '.bot_pid'
-                with open(pid_file, 'w') as f:
-                    f.write(str(process.pid))
-                logger.info(f"Бот успешно запущен (PID: {process.pid})")
-                return True
-
-        logger.error("Бот не смог запуститься")
-        return False
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}")
-        return False
-
 
 def stop_bot() -> bool:
     """
-    Останавливает бота с улучшенной обработкой ошибок.
+    Останавливает бота, управляемого Supervisor'ом, используя supervisorctl.
+    Имеет резервный метод прямого завершения процесса.
 
     Returns:
-        True если бот успешно остановлен, иначе False
+        True если команда stop успешно отправлена Supervisor'у или fallback удался.
+        False если произошла ошибка.
     """
+    logger.info("Попытка остановки бота через Supervisor (из CLI)...")
+    program_name = "bot" # Имя программы из supervisord.conf
+
     try:
-        # Импортируем функцию остановки бота из модуля bot_status
-        try:
-            from src.core.bot_status import stop_bot as stop_bot_process
-            from src.core.bot_status import is_bot_running
+        # Формируем команду supervisorctl stop
+        command = ['supervisorctl', 'stop', program_name]
+        logger.info(f"Выполнение команды Supervisor: {' '.join(command)}")
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=15)
+        output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()
+        logger.debug(f"Supervisorctl stop {program_name} raw output:\n{output.strip()}")
 
-            # Проверяем, запущен ли бот
-            if not is_bot_running():
-                logger.info("Бот не запущен, останавливать нечего")
-                return True
-
-            # Останавливаем бота через API
-            if stop_bot_process():
-                # Проверяем, что бот действительно остановился
-                for _ in range(10):  # Увеличено количество проверок
-                    time.sleep(PROCESS_CHECK_INTERVAL)
-                    if not is_bot_running():
-                        logger.info("Бот успешно остановлен")
-                        return True
-
-                logger.warning("Бот все еще обнаруживается в списке процессов после остановки через API")
-            else:
-                logger.error("Не удалось остановить бота через API")
-        except ImportError:
-            logger.warning("Не удалось импортировать модуль bot_status, используем прямую остановку")
-
-        # Если API не сработало или не доступно, пытаемся остановить процесс напрямую
-        bot_process = find_process_by_name('system.py')
-        if bot_process:
-            pid = bot_process['pid']
-            logger.info(f"Попытка завершить процесс бота (PID: {pid}) напрямую")
-            if safely_terminate_process(pid):
-                logger.info(f"Процесс бота (PID: {pid}) успешно завершен напрямую")
-
-                # Удаляем файл с PID, если он есть
-                pid_file = Path(settings.DATA_DIR) / '.bot_pid'
-                if pid_file.exists():
-                    pid_file.unlink(missing_ok=True)
-
-                return True
-            else:
-                logger.error(f"Не удалось завершить процесс бота (PID: {pid}) напрямую")
-                return False
+        # Анализируем результат
+        if result.returncode == 0 or f"{program_name}: stopped" in output or "not running" in output:
+            logger.info(f"Команда 'supervisorctl stop {program_name}' успешно выполнена или бот уже остановлен.")
+            # Удаляем старый PID файл
+            pid_file = Path(settings.DATA_DIR) / '.bot_pid'
+            pid_file.unlink(missing_ok=True)
+            return True
         else:
-            logger.info("Процесс бота не найден в списке процессов")
-            return True  # Считаем успешным, если процесс бота не найден
+            logger.error(f"Ошибка выполнения 'supervisorctl stop {program_name}'. Code: {result.returncode}. Output: {output.strip()}")
+            logger.warning("Попытка резервной остановки процесса...")
+            return stop_bot_fallback() # Пробуем остановить старым способом
+
+    except FileNotFoundError:
+        logger.error("Команда 'supervisorctl' не найдена.")
+        logger.warning("Попытка резервной остановки процесса...")
+        return stop_bot_fallback()
+    except subprocess.TimeoutExpired:
+        logger.error(f"Тайм-аут выполнения 'supervisorctl stop {program_name}'.")
+        logger.warning("Попытка резервной остановки процесса...")
+        return stop_bot_fallback()
     except Exception as e:
-        logger.error(f"Ошибка при остановке бота: {e}")
-        return False
+         logger.error(f"Неожиданная ошибка при выполнении 'supervisorctl stop': {e}", exc_info=True)
+         logger.warning("Попытка резервной остановки процесса...")
+         return stop_bot_fallback()
+
+# Эта функция нужна для stop_bot, оставь ее или убедись, что она есть
+def stop_bot_fallback() -> bool:
+    """Резервный метод остановки бота (прямое завершение процесса system.py)."""
+    logger.warning("Используется резервный метод остановки бота (прямое завершение процесса).")
+    # <<< УБЕДИТЕСЬ, ЧТО 'system.py' - ПРАВИЛЬНОЕ ИМЯ ОСНОВНОГО ФАЙЛА БОТА >>>
+    bot_process_info = find_process_by_name('system.py')
+    # <<< КОНЕЦ СЕКЦИИ ДЛЯ ПРОВЕРКИ ИМЕНИ ФАЙЛА >>>
+
+    pid_file = Path(settings.DATA_DIR) / '.bot_pid' # Путь к старому PID файлу
+
+    if bot_process_info:
+        pid = bot_process_info['pid']
+        logger.info(f"Резервная остановка: найден процесс бота (PID: {pid}). Попытка завершения...")
+        success = safely_terminate_process(pid) # Используем существующую функцию
+        if success:
+            logger.info(f"Резервная остановка: процесс бота (PID: {pid}) успешно завершен.")
+            pid_file.unlink(missing_ok=True) # Удаляем старый файл
+            return True
+        else:
+            logger.error(f"Резервная остановка: не удалось завершить процесс бота (PID: {pid}).")
+            return False
+    else:
+        logger.info("Резервная остановка: процесс бота не найден.")
+        pid_file.unlink(missing_ok=True) # Все равно удаляем старый файл
+        return True # Считаем успехом, если процесс и так не найден
 
 
 def restart_bot() -> bool:
     """
-    Перезапускает бота, останавливая его, если он уже запущен.
+    Перезапускает бота, управляемого Supervisor'ом, используя 'supervisorctl restart'.
 
     Returns:
-        True если бот успешно перезапущен, иначе False
+        True если команда restart успешно отправлена Supervisor'у.
+        False если произошла ошибка.
     """
+    logger.info("Перезапуск бота через Supervisor (из CLI)...")
+    program_name = "bot" # Имя программы из supervisord.conf
+
     try:
-        logger.info("Перезапуск бота...")
+        # Используем атомарную команду restart
+        command = ['supervisorctl', 'restart', program_name]
+        logger.info(f"Выполнение команды Supervisor: {' '.join(command)}")
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=30) # Увеличен таймаут
+        output = (result.stdout or "").strip() + "\n" + (result.stderr or "").strip()
+        logger.debug(f"Supervisorctl restart {program_name} raw output:\n{output.strip()}")
 
-        # Останавливаем бота
-        stop_bot()
+        # Проверяем результат (успех, если код 0 и есть "stopped", "started" или только "started")
+        if result.returncode == 0 and ("stopped" in output and "started" in output):
+            logger.info(f"Команда 'supervisorctl restart {program_name}' успешно выполнена (перезапуск).")
+            return True
+        elif result.returncode == 0 and "started" in output and ("not running" in output or "stopped" not in output):
+             logger.info(f"Команда 'supervisorctl restart {program_name}' успешно выполнена (запуск остановленного).")
+             return True
+        else:
+            logger.error(f"Ошибка выполнения 'supervisorctl restart {program_name}'. Code: {result.returncode}. Output: {output.strip()}")
+            return False
 
-        # Даем время на завершение процессов
-        time.sleep(2)
-
-        # Запускаем бота заново
-        return start_bot(restart=True)
-    except Exception as e:
-        logger.error(f"Ошибка при перезапуске бота: {e}")
+    except FileNotFoundError:
+        logger.error("Команда 'supervisorctl' не найдена. Невозможно использовать restart.")
         return False
+    except subprocess.TimeoutExpired:
+        logger.error(f"Тайм-аут выполнения 'supervisorctl restart {program_name}'.")
+        return False
+    except Exception as e:
+         logger.error(f"Неожиданная ошибка при выполнении 'supervisorctl restart': {e}", exc_info=True)
+         return False
 
 
 def execute_db_query_safe(db_path: str, query: str, params: Optional[tuple] = None) -> Tuple[
@@ -1763,61 +1737,45 @@ def run_shell(db_path: str, format_type: str = "grid", host: str = '0.0.0.0', po
                 print("  delete-subject-by-name [chat_id] [тема] - Удалить тему по имени у пользователя")
                 print("  sql [запрос] - Выполнить SQL запрос (SQLite)")
 
+
             elif cmd == 'start':
-                print("Запуск системы...")
-
+                print("Запуск системы (веб + запрос Supervisor'у)...")
                 web_started = start_web_interface(host=host, port=port)
-                if web_started:
-                    print("Веб-интерфейс успешно запущен.")
-                else:
-                    print("Ошибка при запуске веб-интерфейса.")
+                print(f"Веб-интерфейс: {'OK' if web_started else 'ОШИБКА'}")
+                # Отправляем команду start через supervisorctl
+                print("Отправка запроса Supervisor на запуск бота...")
+                bot_started = False
+                try:
+                    # Используем функцию из bot_status.py, которая вызывает supervisorctl
+                    from src.core.bot_status import start_bot as supervisor_start_bot
+                    if supervisor_start_bot():
+                        bot_started = True
+                        print("Запрос на запуск бота успешно отправлен.")
+                    else:
+                        print("Ошибка при отправке запроса на запуск бота.")
+                except ImportError:
+                    print("Ошибка: Не удалось импортировать функцию управления ботом.")
+                print(f"Статус запроса Supervisor боту: {'OK' if bot_started else 'ОШИБКА'}")
 
-                bot_started = start_bot()
-                if bot_started:
-                    print("Бот успешно запущен.")
-                else:
-                    print("Ошибка при запуске бота.")
-
-                print(f"Статус запуска: веб - {'OK' if web_started else 'ОШИБКА'}, "
-                      f"бот - {'OK' if bot_started else 'ОШИБКА'}")
             elif cmd == 'stop':
-                print("Остановка системы...")
-
+                print("Остановка системы (веб + запрос Supervisor'у)...")
                 web_stopped = stop_web_interface()
-                if web_stopped:
-                    print("Веб-интерфейс успешно остановлен.")
-                else:
-                    print("Веб-интерфейс не был запущен или произошла ошибка при остановке.")
+                print(f"Веб-интерфейс: {'Остановлен (OK)' if web_stopped else 'ОШИБКА остановки'}")
+                print("Отправка запроса Supervisor на остановку бота...")
+                bot_stopped = stop_bot()  # Вызываем ИЗМЕНЕННУЮ stop_bot из этого файла
+                print(f"Статус запроса Supervisor боту: {'OK' if bot_stopped else 'ОШИБКА'}")
 
-                bot_stopped = stop_bot()
-                if bot_stopped:
-                    print("Бот успешно остановлен.")
-                else:
-                    print("Бот не был запущен или произошла ошибка при остановке.")
-
-                print(f"Статус остановки: веб - {'OK' if web_stopped else 'ОШИБКА'}, "
-                      f"бот - {'OK' if bot_stopped else 'ОШИБКА'}")
             elif cmd == 'restart':
-                print("Перезапуск системы...")
-
-                # Останавливаем компоненты
-                print("Останавливаем компоненты...")
+                print("Перезапуск системы (веб + запрос Supervisor'у)...")
                 web_stopped = stop_web_interface()
-                bot_stopped = stop_bot()
-
-                print(f"Статус остановки: веб - {'OK' if web_stopped else 'ОШИБКА'}, "
-                      f"бот - {'OK' if bot_stopped else 'ОШИБКА'}")
-
-                # Делаем паузу для корректного завершения процессов
-                time.sleep(2)
-
-                # Запускаем компоненты
-                print("Запускаем компоненты...")
+                print(f"Веб-интерфейс: {'Остановлен (OK)' if web_stopped else 'ОШИБКА остановки'}")
+                print("Отправка запроса Supervisor на перезапуск бота...")
+                bot_restarted = restart_bot()  # Вызываем ИЗМЕНЕННУЮ restart_bot из этого файла
+                print(f"Статус запроса Supervisor боту: {'OK' if bot_restarted else 'ОШИБКА'}")
+                time.sleep(1)
                 web_started = start_web_interface(host=host, port=port)
-                bot_started = start_bot(restart=True)
+                print(f"Веб-интерфейс (повторный запуск): {'OK' if web_started else 'ОШИБКА'}")
 
-                print(f"Статус запуска: веб - {'OK' if web_started else 'ОШИБКА'}, "
-                      f"бот - {'OK' if bot_started else 'ОШИБКА'}")
             elif cmd == 'status':
                 print("Проверка статуса системы...")
 
@@ -1905,27 +1863,37 @@ def run_shell(db_path: str, format_type: str = "grid", host: str = '0.0.0.0', po
                     print("Веб-интерфейс успешно остановлен.")
                 else:
                     print("Веб-интерфейс не был запущен или произошла ошибка при остановке.")
+
+
             elif cmd == 'start-bot':
-                print("Запуск бота...")
+                # --- НОВОЕ ПОВЕДЕНИЕ ---
+                print("-------------------------------------------------------------")
+                print("ВАЖНО: Запуск бота теперь управляется Supervisor'ом.")
+                print("Эта команда больше не запускает бота из оболочки.")
+                print("Используйте 'supervisorctl start bot' для запуска.")
+                print("-------------------------------------------------------------")
+                # Опционально: показать статус
+                print("Текущий статус бота по данным Supervisor:")
+                try:
+                    subprocess.run(['supervisorctl', 'status', 'bot'], check=False)
+                except FileNotFoundError:
+                    print("Не удалось выполнить 'supervisorctl status bot'.")
 
-                if start_bot():
-                    print("Бот успешно запущен.")
-                else:
-                    print("Ошибка при запуске бота.")
             elif cmd == 'stop-bot':
-                print("Остановка бота...")
-
-                if stop_bot():
-                    print("Бот успешно остановлен.")
+                print("Отправка запроса Supervisor на остановку бота...")
+                if stop_bot():  # Вызываем ИЗМЕНЕННУЮ stop_bot из этого файла
+                    print("Запрос на остановку успешно отправлен.")
                 else:
-                    print("Бот не был запущен или произошла ошибка при остановке.")
+                    print("Ошибка при отправке запроса на остановку.")
+
+
             elif cmd == 'restart-bot':
-                print("Перезапуск бота...")
-
-                if restart_bot():
-                    print("Бот успешно перезапущен.")
+                print("Отправка запроса Supervisor на перезапуск бота...")
+                if restart_bot():  # Вызываем ИЗМЕНЕННУЮ restart_bot из этого файла
+                    print("Запрос на перезапуск успешно отправлен.")
                 else:
-                    print("Ошибка при перезапуске бота.")
+                    print("Ошибка при отправке запроса на перезапуск.")
+
             elif cmd == 'check':
                 print("Проверка подключений...")
 
@@ -1968,21 +1936,53 @@ def run_shell(db_path: str, format_type: str = "grid", host: str = '0.0.0.0', po
                     for i, error in enumerate(errors, 1):
                         print(f"\n{i}. [{error['timestamp']}] {error['level']} - {error['logger']}")
                         print(f"   {error['message']}")
+
+
             elif cmd == 'optimize':
-                print("Оптимизация системы...")
+                # ВАЖНО: Перед оптимизацией БД нужно остановить бота!
+                print("\n--- ВНИМАНИЕ! ---")
+                print("Перед оптимизацией базы данных рекомендуется остановить бота,")
+                print("чтобы избежать конфликтов блокировки.")
+                confirm_stop = input("Остановить бота сейчас ('supervisorctl stop bot')? (y/n): ")
+                bot_stopped_for_opt = False
+                if confirm_stop.lower() in ['y', 'yes', 'да']:
+                    print("Остановка бота...")
+                    if stop_bot():  # <-- ВЫЗЫВАЕМ НОВЫЙ stop_bot
+                        print("Запрос на остановку отправлен. Пауза перед оптимизацией...")
+                        bot_stopped_for_opt = True
+                        time.sleep(3)  # Даем время на остановку
+                    else:
+                        print("Не удалось отправить запрос на остановку. Оптимизация может не удаться.")
+                # Выполняем операции с БД только если бот остановлен (или не требовалось)
+                if bot_stopped_for_opt:
+                    print("\nОптимизация системы...")
+                    print("\nОчистка старых логов...");
+                    deleted_count, _ = clear_old_logs(days=30);
+                    print(f"Удалено {deleted_count} логов.")
+                    print("\nВосстановление БД...");
+                    db_repaired = repair_database(str(db_path));
+                    print(f"БД {'восстановлена' if db_repaired else 'не удалось восстановить'}.")
+                    print("\nОптимизация БД...");
+                    db_optimized = optimize_database(str(db_path));
+                    print(f"БД {'оптимизирована' if db_optimized else 'не удалось оптимизировать'}.")
+                else:
+                    print("\nПропуск операций с БД (бот не был остановлен).")
+                # Пытаемся запустить бота обратно, если останавливали
+                if bot_stopped_for_opt:
+                    print("\nПопытка запуска бота обратно...")
+                    try:
+                        from src.core.bot_status import start_bot as supervisor_start
+                        if supervisor_start():
+                            print("Запрос на запуск бота отправлен.")
+                        else:
+                            print(
+                                "ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить запрос на запуск бота. Запустите вручную: 'supervisorctl start bot'")
+                    except ImportError:
+                        print("ПРЕДУПРЕЖДЕНИЕ: Ошибка импорта для запуска бота.")
+                    except Exception as e:
+                        print(f"ПРЕДУПРЕЖДЕНИЕ: Ошибка при запуске бота: {e}")
+                print("\nОптимизация завершена.")
 
-                print("\nОчистка старых логов...")
-                deleted_count, _ = clear_old_logs(days=30)
-                print(f"Удалено {deleted_count} старых лог-файлов.")
-
-                print("\nВосстановление базы данных...")
-                db_repaired = repair_database(str(db_path))
-                print(f"База данных {'успешно восстановлена' if db_repaired else 'не удалось восстановить'}.")
-
-                print("\nОптимизация базы данных...")
-                db_optimized = optimize_database(str(db_path))
-                print(
-                    f"База данных {'успешно оптимизирована' if db_optimized else 'не удалось оптимизировать'}.")
             elif cmd == 'debug':
                 print("Отладочная информация системы:")
 
@@ -2559,265 +2559,233 @@ def main() -> None:
             print(f"Ошибка: {e}")
             logger.exception("Ошибка в режиме администрирования")
 
+
     elif args.mode == 'system':
-        # Режим управления системой
-        if args.system_command == 'start':
-            print("Запуск системы...")
 
-            web_started = start_web_interface(host=args.host, port=args.port)
-            if web_started:
-                print("Веб-интерфейс успешно запущен.")
+        # --- ОБНОВЛЕННАЯ ОБРАБОТКА КОМАНД ---
+
+        if args.system_command == 'start-bot':
+            # Эта команда больше не запускает бота напрямую из CLI
+            print("-------------------------------------------------------------")
+            print("ВАЖНО: Запуск бота теперь управляется Supervisor'ом.")
+            print("Эта команда больше не запускает бота из CLI.")
+            print("Используйте 'supervisorctl start bot' для запуска.")
+            print("-------------------------------------------------------------")
+            print("Текущий статус бота по данным Supervisor:")
+            try:
+                # Запускаем supervisorctl status bot, чтобы показать статус
+                subprocess.run(['supervisorctl', 'status', 'bot'], check=False)
+            except FileNotFoundError:
+                print("Не удалось выполнить 'supervisorctl status bot'. Утилита не найдена.")
+            except Exception as e:
+                print(f"Ошибка при проверке статуса: {e}")
+            sys.exit(0)  # Выходим, т.к. CLI больше не запускает
+
+        elif args.system_command == 'stop-bot':
+            print("Отправка команды остановки бота через Supervisor...")
+            if stop_bot():  # Вызываем НОВУЮ stop_bot(), которая использует supervisorctl
+                print("Запрос на остановку бота успешно отправлен.")
+                sys.exit(0)
             else:
-                print("Ошибка при запуске веб-интерфейса.")
+                print("Ошибка при отправке запроса на остановку бота.")
+                sys.exit(1)
 
-            bot_started = start_bot()
-            if bot_started:
-                print("Бот успешно запущен.")
+        elif args.system_command == 'restart-bot':
+            print("Отправка команды перезапуска бота через Supervisor...")
+            if restart_bot():  # Вызываем НОВУЮ restart_bot(), которая использует supervisorctl
+                print("Запрос на перезапуск бота успешно отправлен.")
+                sys.exit(0)
             else:
-                print("Ошибка при запуске бота.")
+                print("Ошибка при отправке запроса на перезапуск бота.")
+                sys.exit(1)
 
-            print(f"Статус запуска: веб - {'OK' if web_started else 'ОШИБКА'}, "
-                  f"бот - {'OK' if bot_started else 'ОШИБКА'}")
+        elif args.system_command == 'start':
+            print("Запуск системы (веб + запрос Supervisor'у)...")
+            web_ok = start_web_interface(host=args.host, port=args.port)  # Запускаем веб как раньше
+            print(f"Веб-интерфейс: {'OK' if web_ok else 'ОШИБКА'}")
+            # Запускаем бота через supervisorctl start bot (используем функцию из bot_status.py)
+            print("Отправка запроса Supervisor на запуск бота...")
+            bot_ok = False
+            try:
+                from src.core.bot_status import start_bot as supervisor_start
+                if supervisor_start():
+                    bot_ok = True
+                    print("Запрос на запуск бота отправлен.")
+                else:
+                    # Ошибка будет залогирована внутри supervisor_start/_run_supervisorctl
+                    print("Не удалось отправить запрос на запуск бота через Supervisor.")
+            except ImportError:
+                print("Ошибка: Не удалось импортировать функцию управления ботом из bot_status.")
+            except Exception as e:
+                print(f"Ошибка при попытке запуска бота через Supervisor: {e}")
+            sys.exit(0 if web_ok and bot_ok else 1)  # Выходим с кодом успеха/ошибки
 
         elif args.system_command == 'stop':
-            print("Остановка системы...")
+            print("Остановка системы (веб + запрос Supervisor'у)...")
+            web_ok = stop_web_interface()  # Останавливаем веб как раньше
+            print(f"Веб-интерфейс: {'Остановлен (OK)' if web_ok else 'ОШИБКА остановки'}")
+            print("Отправка запроса Supervisor на остановку бота...")
 
-            web_stopped = stop_web_interface()
-            if web_stopped:
-                print("Веб-интерфейс успешно остановлен.")
-            else:
-                print("Веб-интерфейс не был запущен или произошла ошибка при остановке.")
+            bot_ok = stop_bot()
+            print(f"Запрос на остановку бота: {'OK' if bot_ok else 'ОШИБКА'}")
+            sys.exit(0 if web_ok and bot_ok else 1)  # Выходим с кодом успеха/ошибки
 
-            bot_stopped = stop_bot()
-            if bot_stopped:
-                print("Бот успешно остановлен.")
-            else:
-                print("Бот не был запущен или произошла ошибка при остановке.")
+        elif args.system_command == 'restart':
+            print("Перезапуск системы (веб + запрос Supervisor'у)...")
+            web_stopped = stop_web_interface()  # Останавливаем веб
+            print(f"Веб-интерфейс остановлен: {'OK' if web_stopped else 'ОШИБКА'}")
+            print("Отправка запроса Supervisor на перезапуск бота...")
+            # Вызов НОВОЙ локальной restart_bot() из этого файла (которая вызывает supervisorctl)
+            bot_restarted = restart_bot()
+            print(f"Запрос на перезапуск бота: {'OK' if bot_restarted else 'ОШИБКА'}")
+            # Даем небольшую паузу перед запуском веба
+            time.sleep(1)
+            # Запускаем веб обратно
+            web_started = start_web_interface(host=args.host, port=args.port)
+            print(f"Веб-интерфейс запущен: {'OK' if web_started else 'ОШИБКА'}")
+            sys.exit(0 if web_started and bot_restarted else 1)  # Выходим с кодом успеха/ошибки
 
-            print(f"Статус остановки: веб - {'OK' if web_stopped else 'ОШИБКА'}, "
-                  f"бот - {'OK' if bot_stopped else 'ОШИБКА'}")
 
         elif args.system_command == 'status':
             print("Проверка статуса системы...")
-
             status = get_system_status(detailed=args.detailed)
-
-            print(f"Веб-интерфейс: {'ЗАПУЩЕН' if status['web_running'] else 'ОСТАНОВЛЕН'}")
-            if status['web_running'] and status['web_pid']:
-                print(f"  PID: {status['web_pid']}")
-
-            print(f"Бот: {'ЗАПУЩЕН' if status['bot_running'] else 'ОСТАНОВЛЕН'}")
-            if status['bot_running']:
-                print(f"  Время работы: {status['bot_uptime']}")
-
-            if 'error' in status:
-                print(f"Ошибка: {status['error']}")
-
-            # Если запрошена детальная информация, показываем дополнительные данные
+            print(
+                f"Веб-интерфейс: {'ЗАПУЩЕН' if status.get('web_running') else 'ОСТАНОВЛЕН'} (PID: {status.get('web_pid')})")
+            print(f"Бот: {'ЗАПУЩЕН' if status.get('bot_running') else 'ОСТАНОВЛЕН'} (PID: {status.get('bot_pid')})")
+            if status.get('bot_running'): print(f"  Время работы: {status.get('bot_uptime', 'Неизвестно')}")
+            if status.get('error'): print(f"  Ошибка статуса: {status['error']}")
+            if status.get('status_source'): print(f"  Источник статуса бота: {status['status_source']}")
             if args.detailed:
-                print("\nДетальная информация:")
 
-                if 'system' in status:
-                    print("\nСистемные ресурсы:")
-                    print(f"  CPU: {status['system']['cpu_percent']}%")
-                    print(f"  Память: {status['system']['memory_percent']}%")
-                    print(f"  Диск: {status['system']['disk_percent']}%")
+                # Вывод детальной информации (system, bot_resources, web_resources, database)
 
-                if 'bot_resources' in status:
-                    print("\nРесурсы бота:")
-                    if 'error' in status['bot_resources']:
-                        print(f"  Ошибка: {status['bot_resources']['error']}")
-                    else:
-                        print(f"  CPU: {status['bot_resources']['cpu_percent']}%")
-                        print(
-                            f"  Память: {status['bot_resources']['memory_percent']}% ({status['bot_resources']['memory_mb']:.2f} МБ)")
-                        print(f"  Потоки: {status['bot_resources']['threads']}")
-                        print(f"  Статус процесса: {status['bot_resources']['status']}")
+                if 'system' in status: print("\nСистемные ресурсы:"); print(
+                    f"  CPU: {status['system']['cpu_percent']:.1f}% Память: {status['system']['memory_percent']:.1f}% Диск: {status['system']['disk_percent']:.1f}%")
 
-                if 'web_resources' in status:
-                    print("\nРесурсы веб-интерфейса:")
-                    if 'error' in status['web_resources']:
-                        print(f"  Ошибка: {status['web_resources']['error']}")
-                    else:
-                        print(f"  CPU: {status['web_resources']['cpu_percent']}%")
-                        print(
-                            f"  Память: {status['web_resources']['memory_percent']}% ({status['web_resources']['memory_mb']:.2f} МБ)")
-                        print(f"  Потоки: {status['web_resources']['threads']}")
-                        print(f"  Статус процесса: {status['web_resources']['status']}")
+                if 'bot_resources' in status: print("\nРесурсы бота:"); print(
+                    f"  CPU: {status['bot_resources'].get('cpu_percent', 'N/A')}% Память: {status['bot_resources'].get('memory_percent', 'N/A')}% ({status['bot_resources'].get('memory_mb', 'N/A'):.2f} МБ) Потоки: {status['bot_resources'].get('threads', 'N/A')} Статус: {status['bot_resources'].get('status', 'N/A')}") if 'error' not in \
+                                                                                                                                                                                                                                                                                                                                 status[
+                                                                                                                                                                                                                                                                                                                                     'bot_resources'] else print(
+                    f"  Ошибка: {status['bot_resources']['error']}")
 
-                if 'database' in status:
-                    print("\nИнформация о базе данных:")
-                    if 'error' in status['database']:
-                        print(f"  Ошибка: {status['database']['error']}")
-                    else:
-                        print(f"  Размер: {status['database']['size_mb']:.2f} МБ")
-                        print(f"  Последнее изменение: {status['database']['last_modified']}")
+                if 'web_resources' in status: print("\nРесурсы веб:"); print(
+                    f"  CPU: {status['web_resources'].get('cpu_percent', 'N/A')}% Память: {status['web_resources'].get('memory_percent', 'N/A')}% ({status['web_resources'].get('memory_mb', 'N/A'):.2f} МБ) Потоки: {status['web_resources'].get('threads', 'N/A')} Статус: {status['web_resources'].get('status', 'N/A')}") if 'error' not in \
+                                                                                                                                                                                                                                                                                                                                 status[
+                                                                                                                                                                                                                                                                                                                                     'web_resources'] else print(
+                    f"  Ошибка: {status['web_resources']['error']}")
 
-                        if 'tables' in status['database']:
-                            print("  Таблицы:")
-                            for table, count in status['database']['tables'].items():
-                                print(f"    {table}: {count} записей")
+                if 'database' in status: print("\nБаза данных:"); print(
+                    f"  Размер: {status['database'].get('size_mb', 'N/A'):.2f} МБ Изменено: {status['database'].get('last_modified', 'N/A')}") if 'error' not in \
+                                                                                                                                                  status[
+                                                                                                                                                      'database'] else print(
+                    f"  Ошибка: {status['database']['error']}"); print("  Таблицы:"); [
+                    print(f"    {t}: {s.get('rows', 'N/A')} строк") for t, s in
+                    status['database'].get('tables', {}).items()] if 'tables' in status['database'] else print(
+                    "    Нет данных о таблицах.")
 
-        elif args.system_command == 'restart':
-            print("Перезапуск системы...")
-
-            # Останавливаем компоненты
-            print("Останавливаем компоненты...")
-            web_stopped = stop_web_interface()
-            bot_stopped = stop_bot()
-
-            print(f"Статус остановки: веб - {'OK' if web_stopped else 'ОШИБКА'}, "
-                  f"бот - {'OK' if bot_stopped else 'ОШИБКА'}")
-
-            # Делаем паузу для корректного завершения процессов
-            time.sleep(2)
-
-            # Запускаем компоненты
-            print("Запускаем компоненты...")
-            web_started = start_web_interface(host=args.host, port=args.port)
-            bot_started = start_bot(restart=True)
-
-            print(f"Статус запуска: веб - {'OK' if web_started else 'ОШИБКА'}, "
-                  f"бот - {'OK' if bot_started else 'ОШИБКА'}")
+            sys.exit(0)
 
         elif args.system_command == 'start-web':
             print("Запуск веб-интерфейса...")
-
-            if start_web_interface(host=args.host, port=args.port):
-                print("Веб-интерфейс успешно запущен.")
-            else:
-                print("Ошибка при запуске веб-интерфейса.")
+            ok = start_web_interface(host=args.host, port=args.port)
+            print(f"Результат: {'OK' if ok else 'ОШИБКА'}")
+            sys.exit(0 if ok else 1)
 
         elif args.system_command == 'stop-web':
             print("Остановка веб-интерфейса...")
-
-            if stop_web_interface():
-                print("Веб-интерфейс успешно остановлен.")
-            else:
-                print("Веб-интерфейс не был запущен или произошла ошибка при остановке.")
-
-        elif args.system_command == 'start-bot':
-            print("Запуск бота...")
-
-            if start_bot():
-                print("Бот успешно запущен.")
-            else:
-                print("Ошибка при запуске бота.")
-
-        elif args.system_command == 'stop-bot':
-            print("Остановка бота...")
-
-            if stop_bot():
-                print("Бот успешно остановлен.")
-            else:
-                print("Бот не был запущен или произошла ошибка при остановке.")
-
-        elif args.system_command == 'restart-bot':
-            print("Перезапуск бота...")
-
-            if restart_bot():
-                print("Бот успешно перезапущен.")
-            else:
-                print("Ошибка при перезапуске бота.")
+            ok = stop_web_interface()
+            print(f"Результат: {'OK' if ok else 'ОШИБКА'}")
+            sys.exit(0 if ok else 1)
 
         elif args.system_command == 'check-connections':
             print("Проверка подключений...")
-
-            # Проверка подключения к почте
-            print("\nПроверка подключения к почте:")
-            email_ok, email_message = check_email_connection()
-            print(f"  Статус: {'OK' if email_ok else 'ОШИБКА'}")
-            if not email_ok and email_message:
-                print(f"  Ошибка: {email_message}")
-            elif email_ok:
-                print(f"  Сервер: {settings.EMAIL_SERVER}")
-                print(f"  Аккаунт: {settings.EMAIL_ACCOUNT}")
-
-            # Проверка подключения к Telegram
-            print("\nПроверка подключения к Telegram API:")
-            telegram_ok, telegram_message = check_telegram_connection()
-            print(f"  Статус: {'OK' if telegram_ok else 'ОШИБКА'}")
-            if not telegram_ok and telegram_message:
-                print(f"  Ошибка: {telegram_message}")
-            elif telegram_ok and telegram_message:
-                print(f"  {telegram_message}")
-
-            # Итоговый статус
-            if email_ok and telegram_ok:
-                print("\nВсе подключения работают корректно.")
-            else:
-                print("\nОбнаружены проблемы с подключениями.")
+            email_ok, email_msg = check_email_connection()
+            telegram_ok, telegram_msg = check_telegram_connection()
+            print(f"\nПочта: {'OK' if email_ok else 'ОШИБКА'}" + (
+                f" ({email_msg})" if not email_ok and email_msg else ""))
+            print(f"Telegram: {'OK' if telegram_ok else 'ОШИБКА'}" + (
+                f" ({telegram_msg})" if not telegram_ok and telegram_msg else f" ({telegram_msg})" if telegram_ok and telegram_msg else ""))
+            sys.exit(0 if email_ok and telegram_ok else 1)
 
         elif args.system_command == 'errors':
             print(f"Показ последних {args.count} ошибок из логов...")
-
             errors = show_error_logs(max_errors=args.count)
-            if not errors:
-                print("Ошибок не найдено или логи недоступны.")
-            else:
+            if errors:
                 print(f"Найдено {len(errors)} ошибок:")
                 for i, error in enumerate(errors, 1):
-                    print(f"\n{i}. [{error['timestamp']}] {error['level']} - {error['logger']}")
-                    print(f"   {error['message']}")
-
+                    print(
+                        f"\n{i}. [{error.get('timestamp', 'N/A')}] {error.get('level', 'N/A')} {error.get('logger', 'N/A')}\n   {error.get('message', 'N/A')}")
+            else:
+                print("Ошибок не найдено или логи недоступны.")
+            sys.exit(0)
         elif args.system_command == 'optimize':
-            print("Оптимизация системы...")
-
-            # Очистка старых логов
-            if args.clear_logs:
-                print(f"\nОчистка логов старше {args.days} дней...")
-                deleted_count, deleted_files = clear_old_logs(days=args.days)
-                if deleted_count > 0:
-                    print(f"Успешно удалено {deleted_count} старых лог-файлов.")
+            # Добавляем остановку/запуск бота вокруг оптимизации БД
+            run_all = not (args.clear_logs or args.repair_db or args.optimize_db)
+            final_success = True
+            # Очистка логов (можно делать без остановки бота)
+            if args.clear_logs or run_all:
+                print("\nОчистка старых логов...");
+                deleted_count, _ = clear_old_logs(days=args.days);
+                print(f"Удалено {deleted_count} логов.")
+            # Остановка бота перед операциями с БД
+            bot_stopped_for_opt = False
+            if args.repair_db or args.optimize_db or run_all:
+                print("\nОстановка бота перед операциями с БД...")
+                if stop_bot():  # <-- ВЫЗЫВАЕМ НОВЫЙ stop_bot()
+                    bot_stopped_for_opt = True;
+                    print("Запрос на остановку бота отправлен. Пауза...");
+                    time.sleep(3)
                 else:
-                    print("Старые лог-файлы не найдены или не удалены.")
-
-            # Восстановление базы данных
-            if args.repair_db:
-                print("\nВосстановление базы данных...")
-                if repair_database(str(db_path)):
-                    print("База данных успешно восстановлена.")
-                else:
-                    print("Ошибка при восстановлении базы данных.")
-
-            # Оптимизация базы данных
-            if args.optimize_db:
-                print("\nОптимизация базы данных...")
-                if optimize_database(str(db_path)):
-                    print("База данных успешно оптимизирована.")
-                else:
-                    print("Ошибка при оптимизации базы данных.")
-
-            # Если не указаны опции, запускаем все оптимизации
-            if not (args.clear_logs or args.repair_db or args.optimize_db):
-                print("\nЗапуск всех оптимизаций...")
-
-                print("\nОчистка старых логов...")
-                deleted_count, _ = clear_old_logs(days=30)
-                print(f"Удалено {deleted_count} старых лог-файлов.")
-
-                print("\nВосстановление базы данных...")
-                db_repaired = repair_database(str(db_path))
-                print(f"База данных {'успешно восстановлена' if db_repaired else 'не удалось восстановить'}.")
-
-                print("\nОптимизация базы данных...")
-                db_optimized = optimize_database(str(db_path))
-                print(
-                    f"База данных {'успешно оптимизирована' if db_optimized else 'не удалось оптимизировать'}.")
-
+                    print("ПРЕДУПРЕЖДЕНИЕ: Не удалось остановить бота. Операции с БД могут быть заблокированы.")
+                    final_success = False  # Считаем операцию неуспешной, если не остановили бота
+            # Выполняем операции с БД только если бот остановлен (или если не требовалось)
+            if bot_stopped_for_opt or not (args.repair_db or args.optimize_db or run_all):
+                if args.repair_db or run_all:
+                    print("\nВосстановление БД...");
+                    ok = repair_database(str(db_path));
+                    print(f"Результат: {'OK' if ok else 'ОШИБКА'}");
+                    final_success &= ok
+                if args.optimize_db or run_all:
+                    print("\nОптимизация БД...");
+                    ok = optimize_database(str(db_path));
+                    print(f"Результат: {'OK' if ok else 'ОШИБКА'}");
+                    final_success &= ok
+            else:
+                # Пропускаем операции с БД, если бот не остановлен
+                if args.repair_db or run_all: print("\nПропуск восстановления БД (бот не остановлен).")
+                if args.optimize_db or run_all: print("\nПропуск оптимизации БД (бот не остановлен).")
+            # Запуск бота обратно, если останавливали
+            if bot_stopped_for_opt:
+                print("\nЗапуск бота после операций с БД...")
+                try:
+                    # Импортируем функцию start_bot из обновленного bot_status.py
+                    from src.core.bot_status import start_bot as supervisor_start
+                    if supervisor_start():
+                        print("Запрос на запуск бота отправлен.")
+                    else:
+                        print("ПРЕДУПРЕЖДЕНИЕ: Не удалось отправить запрос на запуск бота."); final_success = False
+                except ImportError:
+                    print("ПРЕДУПРЕЖДЕНИЕ: Ошибка импорта для запуска бота."); final_success = False
+                except Exception as e:
+                    print(f"ПРЕДУПРЕЖДЕНИЕ: Ошибка при запуске бота: {e}"); final_success = False
+            print("\nОптимизация завершена.")
+            sys.exit(0 if final_success else 1)
         elif args.system_command == 'shell':
+            # Запускаем интерактивную оболочку
             try:
                 run_shell(str(db_path), args.format, args.host, args.port)
+                # run_shell сама обрабатывает выход
             except KeyboardInterrupt:
-                # Обрабатываем Ctrl+C для корректного выхода из оболочки
-                print("\nЗавершение работы...")
-                handle_exit()
+                handle_exit()  # Обрабатываем Ctrl+C в main
+                sys.exit(0)
             except Exception as e:
-                logger.error(f"Ошибка в интерактивной оболочке: {e}")
-                print(f"Ошибка: {e}")
+                logger.error(f"Критическая ошибка при запуске shell: {e}", exc_info=True)
                 handle_exit()
+                sys.exit(1)
         else:
+            # Неизвестная команда system
             system_parser.print_help()
+            sys.exit(1)
 
     else:
         # Если режим не указан, выводим справку
@@ -2832,13 +2800,13 @@ def main() -> None:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        main() # Вызываем main, она обработает sys.exit
     except KeyboardInterrupt:
-        print("\nПрерывание работы...")
-        cleanup_resources()
+        print("\nПрерывание работы CLI...")
+        cleanup_minimal_resources()
         sys.exit(0)
     except Exception as e:
-        logger.exception(f"Неожиданная ошибка: {e}")
-        print(f"Критическая ошибка: {e}")
-        cleanup_resources()
+        logger.exception(f"Неожиданная ошибка в CLI __main__: {e}")
+        print(f"Критическая ошибка CLI: {e}")
+        cleanup_minimal_resources()
         sys.exit(1)

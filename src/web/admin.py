@@ -2,6 +2,7 @@ import re
 import time
 import os
 import secrets
+import gc
 from threading import Lock
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, abort
 from flask_wtf.csrf import CSRFProtect
@@ -11,6 +12,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 from datetime import datetime, timedelta
 import math
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 import concurrent.futures
@@ -25,6 +27,8 @@ from src.db.tools import execute_query, get_table_list, get_table_info, get_comm
     close_all_connections, clear_query_cache
 from src.db.manager import DatabaseManager
 from src.utils.cache_manager import invalidate_caches, is_cache_valid
+
+from src.web.auth import init_admin_users, hash_password, verify_password, log_activity
 
 # Настройка логирования
 logger = get_logger("web_admin")
@@ -85,9 +89,9 @@ app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_FILE_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sessions')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
-app.config['SESSION_COOKIE_SECURE'] = True  # Для HTTPS
+app.config['SESSION_COOKIE_SECURE'] = None  # Для HTTPS
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_SAMESITE'] = None
 
 # Настройка кэширования
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = timedelta(hours=1)
@@ -136,6 +140,15 @@ cache = {}
 cache_timestamps = {}
 CACHE_TTL = 300  # 5 минут в секундах
 cache_lock = Lock()
+
+
+def initialize_database() -> None:
+    """Инициализация базы данных и таблиц для аутентификации."""
+    # Инициализировать таблицы пользователей админки
+    if db_manager:
+        init_admin_users(db_manager)
+    else:
+        logger.error("db_manager не инициализирован при вызове initialize_database")
 
 
 def invalidate_all_caches():
@@ -194,7 +207,8 @@ def get_cached_data(key, refresh_func, ttl=CACHE_TTL):
     """
     with cache_lock:
         current_time = time.time()
-        if key in cache and (current_time - cache_timestamps.get(key, 0)) < ttl and is_cache_valid(cache_timestamps.get(key, 0)):
+        if key in cache and (current_time - cache_timestamps.get(key, 0)) < ttl and is_cache_valid(
+                cache_timestamps.get(key, 0)):
             return cache[key]
 
     # Если данных нет в кэше или они устарели, получаем новые
@@ -225,7 +239,7 @@ def clear_cache(key=None):
             logger.debug("Очищен весь кэш админки")
 
 
-# Функция для проверки авторизации
+# Новые декораторы для проверки прав доступа
 def login_required(f: Callable) -> Callable:
     """
     Декоратор для проверки авторизации пользователя.
@@ -239,7 +253,7 @@ def login_required(f: Callable) -> Callable:
 
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if 'logged_in' not in session:
+        if 'user_id' not in session:
             flash('Пожалуйста, войдите для доступа к этой странице', 'danger')
             return redirect(url_for('login', next=request.url))
 
@@ -259,7 +273,75 @@ def login_required(f: Callable) -> Callable:
     return decorated_function
 
 
-# Функция для проверки наличия дубликатов тем у других пользователей
+def admin_required(f: Callable) -> Callable:
+    """
+    Декоратор для проверки прав администратора.
+
+    Args:
+        f: Декорируемая функция
+
+    Returns:
+        Функция-обертка
+    """
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_role' not in session or session['user_role'] != 'admin':
+            flash('У вас недостаточно прав для доступа к этой странице', 'danger')
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def operator_required(f: Callable) -> Callable:
+    """
+    Декоратор для проверки прав оператора или админа.
+
+    Args:
+        f: Декорируемая функция
+
+    Returns:
+        Функция-обертка
+    """
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_role' not in session or session['user_role'] not in ['operator', 'admin']:
+            flash('У вас недостаточно прав для выполнения этого действия', 'danger')
+            return redirect(url_for('index'))
+        return f(*args, **kwargs)
+
+    return decorated_function
+
+
+def is_allowed_sql(query: str, user_role: str) -> bool:
+    """
+    Проверяет разрешен ли SQL-запрос для данной роли.
+
+    Args:
+        query: SQL-запрос
+        user_role: Роль пользователя
+
+    Returns:
+        True если запрос разрешен, иначе False
+    """
+    query_upper = query.strip().upper()
+
+    # Для читателя запрещены все запросы
+    if user_role == 'viewer':
+        return False
+
+    # Для оператора разрешены только SELECT, PRAGMA и EXPLAIN
+    if user_role == 'operator':
+        return (query_upper.startswith('SELECT') or
+                query_upper.startswith('PRAGMA') or
+                query_upper.startswith('EXPLAIN'))
+
+    # Для админа разрешены все запросы
+    return True
+
+
 def check_duplicate_subjects(subjects: List[str], exclude_chat_id: Optional[str] = None) -> List[str]:
     """
     Проверяет наличие дубликатов тем у других пользователей.
@@ -343,9 +425,16 @@ def robots():
 
 @app.route('/sql-console', methods=['GET', 'POST'])
 @login_required
-@limiter.limit("100 per minute")  # ограничение на кол-во запросов на сайте
+@limiter.limit("100 per minute")
 def sql_console():
     """Консоль для выполнения SQL-запросов."""
+    # Проверка прав доступа
+    user_role = session.get('user_role', 'viewer')
+
+    if user_role == 'viewer':
+        flash('У вас нет прав для доступа к SQL-консоли', 'danger')
+        return redirect(url_for('index'))
+
     # При прямом доступе к SQL-консоли сначала инвалидируем кэши
     if request.method == 'GET' and not request.args.get('query'):
         invalidate_all_caches()
@@ -371,6 +460,26 @@ def sql_console():
     success = False
 
     if query:
+        # Проверяем права на выполнение запроса
+        if not is_allowed_sql(query, user_role):
+            error = "У вас нет прав для выполнения этого типа запроса"
+            flash(error, 'danger')
+            return render_template('sql_console.html',
+                                   query=query,
+                                   results=[],
+                                   headers=[],
+                                   tables=tables,
+                                   table_info={},
+                                   common_queries=common_queries,
+                                   success=False,
+                                   error=error,
+                                   page=1,
+                                   total_pages=0,
+                                   total_results=0,
+                                   search_query='',
+                                   per_page=per_page,
+                                   user_role=user_role)
+
         try:
             # Выполнение запроса без параметров
             success, results, headers, error = execute_query(db_path, query)
@@ -389,6 +498,10 @@ def sql_console():
             # Запись в лог
             if success:
                 logger.info(f"SQL запрос выполнен успешно: {query[:100]}")
+                # Логирование действия пользователя
+                if 'user_id' in session:
+                    log_activity(db_manager, session['user_id'], f"sql_query",
+                                 request.remote_addr, query[:100])
             else:
                 logger.warning(f"Ошибка выполнения SQL запроса: {error}")
         except Exception as e:
@@ -430,7 +543,8 @@ def sql_console():
                                total_pages=total_pages,
                                total_results=total_results,
                                search_query=search_query,
-                               per_page=per_page)
+                               per_page=per_page,
+                               user_role=user_role)
 
     # Для обычных запросов возвращаем полную страницу
     return render_template('sql_console.html',
@@ -446,7 +560,8 @@ def sql_console():
                            total_pages=total_pages,
                            total_results=total_results,
                            search_query=search_query,
-                           per_page=per_page)
+                           per_page=per_page,
+                           user_role=user_role)
 
 
 @app.route('/')
@@ -476,16 +591,20 @@ def index():
         # Получаем актуальный статус бота
         bot_status = get_bot_status(bypass_cache=True)
 
+        # Получаем роль пользователя для отображения доступных действий
+        user_role = session.get('user_role', 'viewer')
+
         return render_template('index.html',
                                total_users=stats['total_users'],
                                active_users=stats['active_users'],
                                total_subjects=stats['total_subjects'],
                                bot_status=bot_status,
-                               timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+                               timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                               user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке главной страницы: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
-        return render_template('index.html', error=str(e))
+        return render_template('index.html', error=str(e), user_role=session.get('user_role', 'viewer'))
 
 
 @app.route('/users')
@@ -538,12 +657,16 @@ def users():
         end_idx = start_idx + per_page
         paginated_users = users_data[start_idx:end_idx] if users_data else []
 
+        # Получаем роль пользователя для отображения доступных действий
+        user_role = session.get('user_role', 'viewer')
+
         return render_template('users.html',
                                users=paginated_users,
                                page=page,
                                total_pages=total_pages,
                                total_users=total_users,
-                               search_query=search_query)
+                               search_query=search_query,
+                               user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке списка пользователей: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
@@ -587,7 +710,10 @@ def user_details(chat_id: str):
             'subjects': subjects
         }
 
-        return render_template('user_details.html', user=user_data)
+        # Получаем роль пользователя для отображения доступных действий
+        user_role = session.get('user_role', 'viewer')
+
+        return render_template('user_details.html', user=user_data, user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке деталей пользователя {chat_id}: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
@@ -596,6 +722,7 @@ def user_details(chat_id: str):
 
 @app.route('/user/<chat_id>/toggle-status', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def toggle_user_status(chat_id: str):
     """
@@ -613,6 +740,11 @@ def toggle_user_status(chat_id: str):
             flash(f"Уведомления для пользователя {chat_id} {status_text}", "success")
             logger.info(f"Изменен статус пользователя {chat_id} на {status_text}")
 
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"toggle_user_status",
+                             request.remote_addr, f"chat_id={chat_id}, new_status={status_text}")
+
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
 
@@ -629,6 +761,7 @@ def toggle_user_status(chat_id: str):
 
 @app.route('/user/<chat_id>/add-subject', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def add_subject(chat_id: str):
     """
@@ -652,11 +785,17 @@ def add_subject(chat_id: str):
             flash(f"Тема '{subject}' уже существует у другого пользователя. Вы хотите продолжить?", "warning")
             return render_template('confirm_duplicate_subject.html',
                                    subject=subject,
-                                   chat_id=chat_id)
+                                   chat_id=chat_id,
+                                   user_role=session.get('user_role', 'viewer'))
 
         if db_manager.add_subject(chat_id, subject):
             flash(f"Тема '{subject}' успешно добавлена", "success")
             logger.info(f"Добавлена тема '{subject}' для пользователя {chat_id}")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"add_subject",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject}")
 
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
@@ -674,6 +813,7 @@ def add_subject(chat_id: str):
 
 @app.route('/user/<chat_id>/edit-subject', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def edit_subject(chat_id: str):
     """
@@ -700,12 +840,18 @@ def edit_subject(chat_id: str):
                 return render_template('confirm_edit_subject.html',
                                        old_subject=old_subject,
                                        new_subject=new_subject,
-                                       chat_id=chat_id)
+                                       chat_id=chat_id,
+                                       user_role=session.get('user_role', 'viewer'))
 
         # Удаляем старую тему и добавляем новую
         if db_manager.delete_subject(chat_id, old_subject) and db_manager.add_subject(chat_id, new_subject):
             flash(f"Тема изменена с '{old_subject}' на '{new_subject}'", "success")
             logger.info(f"Изменена тема с '{old_subject}' на '{new_subject}' для пользователя {chat_id}")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"edit_subject",
+                             request.remote_addr, f"chat_id={chat_id}, old={old_subject}, new={new_subject}")
 
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
@@ -723,6 +869,7 @@ def edit_subject(chat_id: str):
 
 @app.route('/user/<chat_id>/delete-subject', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def delete_subject(chat_id: str):
     """
@@ -742,6 +889,11 @@ def delete_subject(chat_id: str):
             flash(f"Тема '{subject}' успешно удалена", "success")
             logger.info(f"Удалена тема '{subject}' у пользователя {chat_id}")
 
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"delete_subject",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject}")
+
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
 
@@ -758,6 +910,7 @@ def delete_subject(chat_id: str):
 
 @app.route('/user/<chat_id>/add-subjects-bulk', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def add_subjects_bulk(chat_id: str):
     """
@@ -792,7 +945,8 @@ def add_subjects_bulk(chat_id: str):
             return render_template('confirm_bulk_subjects.html',
                                    subjects_text=subjects_text,
                                    chat_id=chat_id,
-                                   duplicate_subjects=duplicate_subjects)
+                                   duplicate_subjects=duplicate_subjects,
+                                   user_role=session.get('user_role', 'viewer'))
 
         # Выполняем в отдельном потоке для большого количества тем
         def add_subjects_task():
@@ -805,6 +959,11 @@ def add_subjects_bulk(chat_id: str):
         if count > 0:
             flash(f"Успешно добавлено {count} новых тем", "success")
             logger.info(f"Добавлено {count} новых тем для пользователя {chat_id}")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"add_subjects_bulk",
+                             request.remote_addr, f"chat_id={chat_id}, count={count}")
 
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
@@ -822,6 +981,7 @@ def add_subjects_bulk(chat_id: str):
 
 @app.route('/user/<chat_id>/delete', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def delete_user(chat_id: str):
     """
@@ -834,6 +994,11 @@ def delete_user(chat_id: str):
         if db_manager.delete_user(chat_id):
             flash(f"Пользователь {chat_id} успешно удален", "success")
             logger.info(f"Пользователь {chat_id} удален")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"delete_user",
+                             request.remote_addr, f"chat_id={chat_id}")
 
             # Полная инвалидация всех кэшей для обеспечения согласованности данных
             invalidate_all_caches()
@@ -915,55 +1080,106 @@ def login():
 
         # Используем блокировку для предотвращения race condition
         with admin_login_lock:
-            if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-                # Сбрасываем все счетчики при успешном входе
-                ip_login_attempts[client_ip] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
-                username_login_attempts[username] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
+            try:
+                with db_manager.get_connection() as conn:
+                    cursor = conn.cursor()
 
-                session.clear()
-                session['logged_in'] = True
-                session['username'] = username
-                session['last_activity'] = time.time()
+                    # Проверяем существование таблицы admin_users
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='admin_users'")
+                    if not cursor.fetchone():
+                        # Если таблицы нет, используем стандартную авторизацию
+                        if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
+                            # Сбрасываем счетчики при успешном входе
+                            ip_login_attempts[client_ip] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
+                            username_login_attempts[username] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
 
-                flash('Вы успешно вошли в систему', 'success')
-                logger.info(f"Пользователь {username} успешно вошел в систему с IP {client_ip}")
+                            session.clear()
+                            session['user_id'] = 1
+                            session['username'] = username
+                            session['user_role'] = 'admin'
+                            session['last_activity'] = time.time()
 
-                next_page = request.args.get('next')
-                return redirect(next_page or url_for('index'))
-            else:
-                # Увеличиваем счетчик неудачных попыток для IP и пользователя
-                ip_login_attempts[client_ip]['attempts'] += 1
-                username_login_attempts[username]['attempts'] += 1
+                            flash('Вы успешно вошли в систему', 'success')
+                            logger.info(f"Пользователь {username} успешно вошел в систему с IP {client_ip}")
 
-                # Проверяем необходимость блокировки IP
-                if ip_login_attempts[client_ip]['attempts'] >= MAX_ATTEMPTS:
-                    lockout_stage = min(ip_login_attempts[client_ip]['lockout_count'], len(LOCKOUT_STAGES) - 1)
-                    lockout_time = LOCKOUT_STAGES[lockout_stage]
+                            # Инициализация БД для создания таблиц admin_users
+                            initialize_database()
 
-                    ip_login_attempts[client_ip]['locked_until'] = current_time + lockout_time
-                    ip_login_attempts[client_ip]['lockout_count'] += 1
-                    ip_login_attempts[client_ip]['attempts'] = 0
+                            next_page = request.args.get('next')
+                            return redirect(next_page or url_for('index'))
+                    else:
+                        # Используем новую систему авторизации
+                        cursor.execute(
+                            "SELECT id, username, password_hash, role, is_active FROM admin_users WHERE username = ?",
+                            (username,)
+                        )
+                        user = cursor.fetchone()
 
-                    # Глобальная блокировка при большом количестве заблокированных IP
-                    blocked_ips = sum(
-                        1 for ip, data in ip_login_attempts.items() if data['locked_until'] > current_time)
-                    if blocked_ips >= global_lockout_trigger_threshold:
-                        global_lockout_until = current_time + LOCKOUT_STAGES[0]  # 15 минут по умолчанию
-                        logger.warning(f"Активирована глобальная блокировка: {blocked_ips} заблокированных IP")
+                        if user and user['is_active'] and verify_password(user['password_hash'], password):
+                            # Обновляем время последнего входа
+                            cursor.execute(
+                                "UPDATE admin_users SET last_login = ? WHERE id = ?",
+                                (datetime.now().strftime('%Y-%m-%d %H:%M:%S'), user['id'])
+                            )
+                            conn.commit()
 
-                # Проверяем необходимость блокировки пользователя
-                if username_login_attempts[username]['attempts'] >= MAX_ATTEMPTS:
-                    lockout_stage = min(username_login_attempts[username]['lockout_count'], len(LOCKOUT_STAGES) - 1)
-                    lockout_time = LOCKOUT_STAGES[lockout_stage]
+                            # Сбрасываем счетчики при успешном входе
+                            ip_login_attempts[client_ip] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
+                            username_login_attempts[username] = {'attempts': 0, 'locked_until': 0, 'lockout_count': 0}
 
-                    username_login_attempts[username]['locked_until'] = current_time + lockout_time
-                    username_login_attempts[username]['lockout_count'] += 1
-                    username_login_attempts[username]['attempts'] = 0
+                            session.clear()
+                            session['user_id'] = user['id']
+                            session['username'] = user['username']
+                            session['user_role'] = user['role']
+                            session['last_activity'] = time.time()
 
-                # Выводим сообщение о неудачной попытке
-                remaining_ip = MAX_ATTEMPTS - ip_login_attempts[client_ip]['attempts']
-                flash(f'Неправильное имя пользователя или пароль. Осталось попыток: {remaining_ip}', 'danger')
-                logger.warning(f"Неудачная попытка входа с IP {client_ip} для пользователя: {username}")
+                            # Логируем вход
+                            log_activity(db_manager, user['id'], "login", client_ip)
+
+                            flash('Вы успешно вошли в систему', 'success')
+                            logger.info(f"Пользователь {username} успешно вошел в систему с IP {client_ip}")
+
+                            next_page = request.args.get('next')
+                            return redirect(next_page or url_for('index'))
+
+                    # Если дошли сюда, значит авторизация не удалась
+                    # Увеличиваем счетчик неудачных попыток для IP и пользователя
+                    ip_login_attempts[client_ip]['attempts'] += 1
+                    username_login_attempts[username]['attempts'] += 1
+
+                    # Проверяем необходимость блокировки IP
+                    if ip_login_attempts[client_ip]['attempts'] >= MAX_ATTEMPTS:
+                        lockout_stage = min(ip_login_attempts[client_ip]['lockout_count'], len(LOCKOUT_STAGES) - 1)
+                        lockout_time = LOCKOUT_STAGES[lockout_stage]
+
+                        ip_login_attempts[client_ip]['locked_until'] = current_time + lockout_time
+                        ip_login_attempts[client_ip]['lockout_count'] += 1
+                        ip_login_attempts[client_ip]['attempts'] = 0
+
+                        # Глобальная блокировка при большом количестве заблокированных IP
+                        blocked_ips = sum(
+                            1 for ip, data in ip_login_attempts.items() if data['locked_until'] > current_time)
+                        if blocked_ips >= global_lockout_trigger_threshold:
+                            global_lockout_until = current_time + LOCKOUT_STAGES[0]  # 15 минут по умолчанию
+                            logger.warning(f"Активирована глобальная блокировка: {blocked_ips} заблокированных IP")
+
+                    # Проверяем необходимость блокировки пользователя
+                    if username_login_attempts[username]['attempts'] >= MAX_ATTEMPTS:
+                        lockout_stage = min(username_login_attempts[username]['lockout_count'], len(LOCKOUT_STAGES) - 1)
+                        lockout_time = LOCKOUT_STAGES[lockout_stage]
+
+                        username_login_attempts[username]['locked_until'] = current_time + lockout_time
+                        username_login_attempts[username]['lockout_count'] += 1
+                        username_login_attempts[username]['attempts'] = 0
+
+                    # Выводим сообщение о неудачной попытке
+                    remaining_ip = MAX_ATTEMPTS - ip_login_attempts[client_ip]['attempts']
+                    flash(f'Неправильное имя пользователя или пароль. Осталось попыток: {remaining_ip}', 'danger')
+                    logger.warning(f"Неудачная попытка входа с IP {client_ip} для пользователя: {username}")
+
+            except Exception as e:
+                logger.error(f"Ошибка при проверке авторизации: {e}")
+                flash("Ошибка при входе в систему", "danger")
 
     return render_template('login.html')
 
@@ -972,6 +1188,11 @@ def login():
 def logout():
     """Выход из системы."""
     username = session.get('username', 'Неизвестный')
+    user_id = session.get('user_id')
+
+    # Логирование выхода
+    if user_id:
+        log_activity(db_manager, user_id, "logout", request.remote_addr)
 
     session.clear()
     flash('Вы вышли из системы', 'info')
@@ -982,6 +1203,7 @@ def logout():
 
 @app.route('/add-user', methods=['GET', 'POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def add_user():
     """Страница добавления нового пользователя."""
@@ -996,12 +1218,12 @@ def add_user():
             # Проверка chat_id
             if not chat_id:
                 flash("Chat ID не может быть пустым", "warning")
-                return render_template('add_user.html')
+                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
             # Проверка, что chat_id содержит только цифры
             if not re.match(r'^\d+$', chat_id):
                 flash("Chat ID должен содержать только цифры", "warning")
-                return render_template('add_user.html')
+                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
             # Проверка существования пользователя
             user_exists = db_manager.is_user_registered(chat_id)
@@ -1022,7 +1244,8 @@ def add_user():
                                        user_exists=True,
                                        chat_id=chat_id,
                                        status=status,
-                                       subjects=subjects_text)
+                                       subjects=subjects_text,
+                                       user_role=session.get('user_role', 'viewer'))
 
             # Если есть дубликаты тем и нет подтверждения, возвращаем форму подтверждения
             if duplicate_subjects and not confirm_duplicate_subjects:
@@ -1032,7 +1255,8 @@ def add_user():
                                        chat_id=chat_id,
                                        status=status,
                                        subjects=subjects_text,
-                                       duplicate_subjects=True)
+                                       duplicate_subjects=True,
+                                       user_role=session.get('user_role', 'viewer'))
 
             # Добавление/обновление пользователя
             logger.info(f"Отправка запроса на добавление пользователя {chat_id} в БД")
@@ -1042,6 +1266,11 @@ def add_user():
                 action = "обновлен" if user_exists else "добавлен"
                 flash(f"Пользователь {chat_id} успешно {action}", "success")
                 logger.info(f"Пользователь {chat_id} {action}")
+
+                # Логирование действия
+                if 'user_id' in session:
+                    log_activity(db_manager, session['user_id'], f"add_user",
+                                 request.remote_addr, f"chat_id={chat_id}, status={status}")
 
                 # Если есть темы, добавляем их в отдельном потоке для больших списков
                 if subjects:
@@ -1055,6 +1284,11 @@ def add_user():
                         flash(f"Успешно добавлено {count} тем для пользователя", "success")
                         logger.info(f"Добавлено {count} тем для пользователя {chat_id}")
 
+                        # Логирование действия добавления тем
+                        if 'user_id' in session:
+                            log_activity(db_manager, session['user_id'], f"add_subjects",
+                                         request.remote_addr, f"chat_id={chat_id}, count={count}")
+
                 # Полная инвалидация всех кэшей для обеспечения согласованности данных
                 invalidate_all_caches()
 
@@ -1062,14 +1296,14 @@ def add_user():
             else:
                 logger.error(f"Не удалось добавить пользователя {chat_id} в БД")
                 flash(f"Не удалось добавить пользователя {chat_id}. Проверьте логи сервера.", "danger")
-                return render_template('add_user.html')
+                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
         except Exception as e:
             logger.error(f"Ошибка при добавлении нового пользователя: {e}", exc_info=True)
             flash(f"Произошла ошибка: {e}", "danger")
-            return render_template('add_user.html')
+            return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
-    return render_template('add_user.html')
+    return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
 
 @app.route('/bot-status')
@@ -1079,7 +1313,8 @@ def bot_status():
     try:
         # Всегда получаем актуальный статус, игнорируя кэш
         status = get_bot_status(bypass_cache=True)
-        return render_template('bot_status.html', status=status)
+        user_role = session.get('user_role', 'viewer')
+        return render_template('bot_status.html', status=status, user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при получении статуса бота: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
@@ -1088,6 +1323,7 @@ def bot_status():
 
 @app.route('/bot-status/start', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def start_bot_handler():
     """Запуск бота."""
@@ -1095,12 +1331,23 @@ def start_bot_handler():
         logger.info("Отправка команды на запуск бота")
         result = start_bot()
 
+        # Создаем флаг ручной остановки
+        if result:
+            manual_stop_path = "/app/data/.manual_stop"
+            if os.path.exists(manual_stop_path):
+                os.remove(manual_stop_path)
+                logger.info(f"Удален флаг ручной остановки: {manual_stop_path}")
+
         # Полная инвалидация всех кэшей для обеспечения согласованности данных
         invalidate_all_caches()
 
         if result:
             flash("Бот успешно запущен", "success")
             logger.info("Пользователь запустил бота через веб-интерфейс")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "start_bot", request.remote_addr)
         else:
             flash("Не удалось запустить бота", "warning")
             logger.warning("Не удалось запустить бота через веб-интерфейс")
@@ -1113,6 +1360,7 @@ def start_bot_handler():
 
 @app.route('/bot-status/stop', methods=['POST'])
 @login_required
+@operator_required
 @limiter.limit("100 per minute")
 def stop_bot_handler():
     """Остановка бота."""
@@ -1120,12 +1368,23 @@ def stop_bot_handler():
         logger.info("Отправка команды на остановку бота")
         result = stop_bot()
 
+        # Создаем флаг ручной остановки
+        if result:
+            manual_stop_path = "/app/data/.manual_stop"
+            with open(manual_stop_path, 'w') as f:
+                f.write('1')
+            logger.info(f"Создан флаг ручной остановки: {manual_stop_path}")
+
         # Полная инвалидация всех кэшей для обеспечения согласованности данных
         invalidate_all_caches()
 
         if result:
             flash("Бот успешно остановлен", "success")
             logger.info("Пользователь остановил бота через веб-интерфейс")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "stop_bot", request.remote_addr)
         else:
             flash("Не удалось остановить бота", "warning")
             logger.warning("Не удалось остановить бота через веб-интерфейс")
@@ -1165,44 +1424,142 @@ def bot_status_api():
 
 @app.route('/optimize-db', methods=['POST'])
 @login_required
+@admin_required
 @limiter.limit("2 per hour")
 def optimize_db():
-    """Оптимизация базы данных."""
+    """Запуск оптимизации базы данных"""
     try:
-        # Выполняем оптимизацию в отдельном потоке
-        def optimize_task():
-            global db_manager
-            db_manager.shutdown()  # Закрываем все соединения перед оптимизацией
-            result = optimize_database()
-            # Создаем новый экземпляр менеджера после оптимизации
-            db_manager = DatabaseManager()
-            return result
+        # Прямая оптимизация без сложного скрипта
+        script = """
+import os, sys, time, sqlite3, subprocess
 
-        future = executor.submit(optimize_task)
-        result = future.result()
+# Остановка бота
+subprocess.run(["supervisorctl", "stop", "bot"])
+time.sleep(5)
 
-        if result:
-            # Полная инвалидация всех кэшей для обеспечения согласованности данных
-            invalidate_all_caches()
+# Оптимизация
+try:
+    db_path = "/app/data/email_bot.db"
+    conn = sqlite3.connect(db_path, isolation_level="EXCLUSIVE", timeout=60)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    cursor.execute("VACUUM")
+    cursor.execute("ANALYZE")
+    cursor.execute("PRAGMA optimize")
+    conn.close()
 
-            flash("База данных успешно оптимизирована", "success")
-            logger.info("База данных успешно оптимизирована")
-        else:
-            flash("Не удалось оптимизировать базу данных", "warning")
-            logger.warning("Не удалось оптимизировать базу данных")
+    # Создаем файл об успешном завершении
+    with open("/app/data/.optimize_success", "w") as f:
+        f.write("1")
+except Exception as e:
+    with open("/app/data/.optimize_error", "w") as f:
+        f.write(str(e))
+
+# Запуск бота
+subprocess.run(["supervisorctl", "start", "bot"])
+
+# Удаление флага блокировки
+if os.path.exists("/app/data/email_bot.db.optimize.lock"):
+    os.unlink("/app/data/email_bot.db.optimize.lock")
+"""
+        script_path = os.path.join(settings.DATA_DIR, "optimize_db.py")
+        with open(script_path, "w") as f:
+            f.write(script)
+
+        # Создаем файл-флаг блокировки
+        lock_file = settings.DATABASE_PATH + ".optimize.lock"
+        with open(lock_file, "w") as f:
+            f.write(str(int(time.time())))
+
+        # Запускаем процесс
+        subprocess.Popen(["python", script_path],
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL,
+                         close_fds=True)
+
+        # Логируем действие
+        if 'user_id' in session and db_manager:
+            log_activity(db_manager, session['user_id'], "optimize_db", request.remote_addr)
+
+        flash("Оптимизация запущена. Страница обновится автоматически.", "info")
+
+        processes = []
+        # Получение списка процессов
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
+            try:
+                pinfo = proc.as_dict(['pid', 'name', 'cmdline', 'create_time'])
+                if 'python' in pinfo.get('name', '').lower():
+                    pinfo['cmdline_str'] = ' '.join([str(cmd) for cmd in pinfo.get('cmdline', []) if cmd])
+                    processes.append(pinfo)
+            except:
+                pass
+
+        # Проверка файлов БД
+        db_files = {}
+        db_path = Path(settings.DATABASE_PATH)
+        if db_path.exists():
+            db_files['main'] = {
+                'size': db_path.stat().st_size // 1024,
+                'mtime': datetime.fromtimestamp(db_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+            }
+
+        # Статус бота
+        bot_status_info = get_bot_status(bypass_cache=True)
+
+        return render_template('diagnostics.html',
+                               optimization_started=True,
+                               processes=processes,
+                               db_files=db_files,
+                               bot_status=bot_status_info)
+
     except Exception as e:
-        flash(f"Ошибка при оптимизации базы данных: {e}", "danger")
-        logger.error(f"Ошибка при оптимизации базы данных: {e}", exc_info=True)
+        logger.error(f"Ошибка при запуске оптимизации: {e}", exc_info=True)
+        flash(f"Ошибка: {e}", "danger")
+        return redirect(url_for('diagnostics'))
 
-    return redirect(url_for('index'))
 
+@app.route('/optimization-status')
+@login_required
+def optimization_status():
+    """Проверка статуса оптимизации"""
+    success_file = os.path.join(settings.DATA_DIR, ".optimize_success")
+    error_file = os.path.join(settings.DATA_DIR, ".optimize_error")
+    lock_file = settings.DATABASE_PATH + ".optimize.lock"
+
+    if os.path.exists(success_file):
+        try:
+            os.unlink(success_file)
+        except:
+            pass
+        return jsonify({"status": "completed"})
+    elif os.path.exists(error_file):
+        try:
+            with open(error_file) as f:
+                error = f.read()
+            os.unlink(error_file)
+        except:
+            error = "Неизвестная ошибка"
+        return jsonify({"status": "error", "message": error})
+    elif os.path.exists(lock_file):
+        # Проверка устаревшего lock-файла (старше 5 минут)
+        file_time = os.path.getmtime(lock_file)
+        if time.time() - file_time > 300:  # 5 минут
+            try:
+                os.unlink(lock_file)
+            except:
+                pass
+            return jsonify({"status": "not_running"})
+        return jsonify({"status": "running"})
+    else:
+        return jsonify({"status": "not_running"})
 
 @app.route('/help')
 @login_required
 def help():
     """Страница со справочной информацией."""
     try:
-        return render_template('help.html')
+        user_role = session.get('user_role', 'viewer')
+        return render_template('help.html', user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке страницы справки: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
@@ -1211,6 +1568,7 @@ def help():
 
 @app.route('/diagnostics')
 @login_required
+@admin_required
 def diagnostics():
     """Страница диагностики системы."""
     try:
@@ -1263,32 +1621,248 @@ def diagnostics():
         return redirect(url_for('index'))
 
 
+# Новые маршруты для управления пользователями админки
+@app.route('/admin/users')
+@login_required
+@admin_required
+def admin_users():
+    """Управление административными пользователями."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, username, role, created_at, last_login, is_active 
+                FROM admin_users ORDER BY username
+            """)
+            users = cursor.fetchall()
+            return render_template('admin_users.html', users=users, user_role='admin')
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка пользователей админки: {e}")
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('index'))
+
+
+@app.route('/admin/users/add', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def add_admin_user():
+    """Добавление нового административного пользователя."""
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '')
+        role = request.form.get('role', 'viewer')
+
+        if not username or not password:
+            flash("Имя пользователя и пароль обязательны", "warning")
+            return render_template('add_admin_user.html', user_role='admin')
+
+        try:
+            with db_manager.get_connection() as conn:
+                cursor = conn.cursor()
+                # Проверяем, существует ли пользователь
+                cursor.execute("SELECT 1 FROM admin_users WHERE username = ?", (username,))
+                if cursor.fetchone():
+                    flash(f"Пользователь с именем {username} уже существует", "warning")
+                    return render_template('add_admin_user.html', user_role='admin')
+
+                # Хешируем пароль и добавляем пользователя
+                password_hash = hash_password(password)
+                cursor.execute(
+                    "INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)",
+                    (username, password_hash, role)
+                )
+                conn.commit()
+
+                # Получаем ID нового пользователя
+                cursor.execute("SELECT id FROM admin_users WHERE username = ?", (username,))
+                user_id = cursor.fetchone()['id']
+
+                # Логируем действие
+                log_activity(db_manager, session['user_id'], f"created_user",
+                             request.remote_addr, f"username={username}, role={role}")
+
+                flash(f"Пользователь {username} успешно добавлен", "success")
+                return redirect(url_for('admin_users'))
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении пользователя админки: {e}")
+            flash(f"Произошла ошибка: {e}", "danger")
+            return render_template('add_admin_user.html', user_role='admin')
+
+    return render_template('add_admin_user.html', user_role='admin')
+
+
+@app.route('/admin/users/edit/<int:user_id>', methods=['GET', 'POST'])
+@login_required
+@admin_required
+def edit_admin_user(user_id):
+    """Редактирование административного пользователя."""
+    try:
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+
+            if request.method == 'POST':
+                username = request.form.get('username', '').strip()
+                password = request.form.get('password', '')
+                role = request.form.get('role', 'viewer')
+                is_active = request.form.get('is_active') == 'true'
+
+                if not username:
+                    flash("Имя пользователя не может быть пустым", "warning")
+                    return redirect(url_for('edit_admin_user', user_id=user_id))
+
+                # Проверяем, что имя не занято другим пользователем
+                cursor.execute("SELECT id FROM admin_users WHERE username = ? AND id != ?", (username, user_id))
+                if cursor.fetchone():
+                    flash(f"Пользователь с именем {username} уже существует", "warning")
+                    return redirect(url_for('edit_admin_user', user_id=user_id))
+
+                # Обновляем данные пользователя
+                if password:
+                    # Если указан новый пароль
+                    password_hash = hash_password(password)
+                    cursor.execute(
+                        "UPDATE admin_users SET username = ?, password_hash = ?, role = ?, is_active = ? WHERE id = ?",
+                        (username, password_hash, role, is_active, user_id)
+                    )
+                else:
+                    # Если пароль не менялся
+                    cursor.execute(
+                        "UPDATE admin_users SET username = ?, role = ?, is_active = ? WHERE id = ?",
+                        (username, role, is_active, user_id)
+                    )
+
+                conn.commit()
+
+                # Логируем действие
+                log_activity(db_manager, session['user_id'], f"edit_user",
+                             request.remote_addr, f"user_id={user_id}, role={role}")
+
+                flash(f"Пользователь {username} успешно обновлен", "success")
+                return redirect(url_for('admin_users'))
+
+            # GET запрос - загружаем данные пользователя
+            cursor.execute("SELECT * FROM admin_users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+
+            if not user:
+                flash("Пользователь не найден", "danger")
+                return redirect(url_for('admin_users'))
+
+            return render_template('edit_admin_user.html', user=user, user_role='admin')
+
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании пользователя админки: {e}")
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('admin_users'))
+
+
+@app.route('/admin/users/delete/<int:user_id>', methods=['POST'])
+@login_required
+@admin_required
+def delete_admin_user(user_id):
+    """Удаление административного пользователя."""
+    try:
+        # Нельзя удалить самого себя
+        if user_id == session.get('user_id'):
+            flash("Невозможно удалить собственную учетную запись", "danger")
+            return redirect(url_for('admin_users'))
+
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Получаем имя пользователя для логирования
+            cursor.execute("SELECT username FROM admin_users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+
+            if not user:
+                flash("Пользователь не найден", "danger")
+                return redirect(url_for('admin_users'))
+
+            # Удаляем пользователя
+            cursor.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+            conn.commit()
+
+            # Логируем действие
+            log_activity(db_manager, session['user_id'], f"delete_user",
+                         request.remote_addr, f"username={user['username']}")
+
+            flash(f"Пользователь {user['username']} успешно удален", "success")
+            return redirect(url_for('admin_users'))
+
+    except Exception as e:
+        logger.error(f"Ошибка при удалении пользователя админки: {e}")
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('admin_users'))
+
+
+@app.route('/activity-log')
+@login_required
+@admin_required
+def activity_log():
+    """Просмотр журнала активности пользователей."""
+    try:
+        page = request.args.get('page', 1, type=int)
+        per_page = 50  # Показываем больше записей на странице
+
+        with db_manager.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # Получаем общее количество записей
+            cursor.execute("SELECT COUNT(*) FROM activity_log")
+            total_entries = cursor.fetchone()[0]
+
+            # Пагинация
+            total_pages = math.ceil(total_entries / per_page)
+            offset = (page - 1) * per_page
+
+            # Получаем записи журнала с информацией о пользователях
+            cursor.execute("""
+                SELECT l.id, l.user_id, u.username, l.action, l.timestamp, l.ip_address, l.resource
+                FROM activity_log l
+                LEFT JOIN admin_users u ON l.user_id = u.id
+                ORDER BY l.timestamp DESC
+                LIMIT ? OFFSET ?
+            """, (per_page, offset))
+
+            logs = cursor.fetchall()
+
+            return render_template('activity_log.html',
+                                   logs=logs,
+                                   page=page,
+                                   total_pages=total_pages,
+                                   user_role='admin')
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке журнала активности: {e}")
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('index'))
+
+
 @app.errorhandler(404)
 def page_not_found(e):
     """Обработка 404 ошибки."""
     logger.warning(f"Страница не найдена: {request.path}")
-    return render_template('404.html'), 404
+    return render_template('404.html', user_role=session.get('user_role', 'viewer')), 404
 
 
 @app.errorhandler(500)
 def internal_server_error(e):
     """Обработка 500 ошибки."""
     logger.error(f"Внутренняя ошибка сервера: {e}", exc_info=True)
-    return render_template('500.html'), 500
+    return render_template('500.html', user_role=session.get('user_role', 'viewer')), 500
 
 
 @app.errorhandler(429)
 def ratelimit_handler(e):
     """Обработка превышения лимита запросов."""
     logger.warning(f"Превышение лимита запросов: {request.path} с IP {request.remote_addr}")
-    return render_template('429.html', error=str(e)), 429
+    return render_template('429.html', error=str(e), user_role=session.get('user_role', 'viewer')), 429
 
 
 @app.errorhandler(403)
 def forbidden_handler(e):
     """Обработка ошибки доступа."""
     logger.warning(f"Запрещенный доступ: {request.path} с IP {request.remote_addr}")
-    return render_template('403.html', error=str(e)), 403
+    return render_template('403.html', error=str(e), user_role=session.get('user_role', 'viewer')), 403
 
 
 def parse_args():
@@ -1308,6 +1882,24 @@ def parse_args():
     return parser.parse_args()
 
 
+# Настройки для Gunicorn
+def get_gunicorn_config():
+    """Получение настроек для Gunicorn из переменных окружения."""
+    import os
+
+    config = {
+        'bind': os.environ.get('GUNICORN_BIND', '0.0.0.0:5000'),
+        'workers': int(os.environ.get('GUNICORN_WORKERS', '2')),
+        'timeout': int(os.environ.get('GUNICORN_TIMEOUT', '60')),
+        'worker_class': os.environ.get('GUNICORN_WORKER_CLASS', 'sync'),
+        'max_requests': int(os.environ.get('GUNICORN_MAX_REQUESTS', '1000')),
+        'max_requests_jitter': int(os.environ.get('GUNICORN_MAX_REQUESTS_JITTER', '50')),
+        'access_log_format': '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(D)s ms',
+    }
+
+    return config
+
+
 def main():
     """Основная функция для запуска веб-интерфейса."""
     # Разбор аргументов командной строки
@@ -1320,6 +1912,9 @@ def main():
         print("ОШИБКА: Отсутствует пароль администратора (ADMIN_PASSWORD) в переменных окружения!")
         print("Добавьте ADMIN_PASSWORD в файл .env и перезапустите приложение.")
         sys.exit(1)
+
+    # Инициализация базы данных для пользователей админки
+    initialize_database()
 
     # Запускаем приложение
     logger.info(f"Запуск веб-интерфейса администратора на {args.host}:{args.port}")

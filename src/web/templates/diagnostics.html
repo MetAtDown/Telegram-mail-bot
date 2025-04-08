@@ -1,0 +1,160 @@
+{% extends 'base.html' %}
+
+{% block title %}Диагностика | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Диагностика системы</h1>
+    <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> На главную
+    </a>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="panel">
+            <div class="panel-header">Статус бота</div>
+            <div class="panel-body">
+                <div class="bot-status-info">
+                    <div class="status-row">
+                        <div class="status-item">
+                            <span class="status-indicator {% if bot_status and bot_status.running %}status-active{% else %}status-inactive{% endif %}"></span> 
+                            Статус: {% if bot_status and bot_status.running %}Работает{% else %}Неактивен{% endif %}
+                        </div>
+                        {% if bot_status and bot_status.running %}
+                        <div class="uptime-value">{{ bot_status.uptime|default('-') }}</div>
+                        {% endif %}
+                    </div>
+                    {% if bot_status.pid %}
+                    <div>PID процесса: {{ bot_status.pid }}</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Системные процессы</div>
+    <div class="panel-body">
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>PID</th>
+                        <th>Имя</th>
+                        <th>Запущен</th>
+                        <th>Командная строка</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for proc in processes %}
+                    <tr>
+                        <td>{{ proc.pid }}</td>
+                        <td>{{ proc.name }}</td>
+                        <td>{{ proc.create_time|default('-') }}</td>
+                        <td>{{ proc.cmdline_str|default('-') }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center">Процессы не найдены</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Файлы базы данных</div>
+    <div class="panel-body">
+        <div class="table-responsive">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Файл</th>
+                        <th>Размер (КБ)</th>
+                        <th>Последнее изменение</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for file_type, file_info in db_files.items() %}
+                    <tr>
+                        <td>{{ file_type }}</td>
+                        <td>{{ file_info.size }}</td>
+                        <td>{{ file_info.mtime }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="3" class="text-center">Файлы не найдены</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Действия</div>
+    <div class="panel-body">
+        <form method="post" action="{{ url_for('optimize_db') }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите оптимизировать базу данных?');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-warning" id="optimize-btn">Оптимизировать базу данных</button>
+        </form>
+        
+        <!-- Индикатор процесса оптимизации -->
+        <div id="optimization-status" style="display: none; margin-top: 10px;">
+            <div class="progress">
+                <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%"></div>
+            </div>
+            <div id="optimization-message" style="margin-top: 5px; font-style: italic;">
+                Выполняется оптимизация базы данных... Не закрывайте страницу.
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Скрипт для проверки статуса оптимизации -->
+<script>
+    // Проверка, запущена ли оптимизация
+    {% if optimization_started %}
+    document.getElementById('optimize-btn').disabled = true;
+    document.getElementById('optimization-status').style.display = 'block';
+    
+    let checkInterval;
+    
+    function checkOptimizationStatus() {
+        fetch('/optimization-status')
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === "completed" || data.status === "error" || data.status === "not_running") {
+                    clearInterval(checkInterval);
+                    
+                    // Показываем уведомление об успехе
+                    if (data.status === "completed") {
+                        const alertDiv = document.createElement('div');
+                        alertDiv.className = 'flash-messages';
+                        alertDiv.innerHTML = '<div class="alert alert-success">Оптимизация базы данных успешно завершена!</div>';
+                        document.querySelector('.page-header').after(alertDiv);
+                    }
+                    
+                    // При любом завершении обновляем интерфейс
+                    document.getElementById('optimize-btn').disabled = false;
+                    document.getElementById('optimization-status').style.display = 'none';
+                    
+                    // Важно! Перенаправляем на страницу без параметра optimization_started
+                    window.location.href = "{{ url_for('diagnostics') }}";
+                }
+            })
+            .catch(error => {
+                console.error('Ошибка при проверке статуса:', error);
+            });
+    }
+    
+    // Запускаем проверку каждые 5 секунд
+    checkInterval = setInterval(checkOptimizationStatus, 5000);
+    {% endif %}
+</script>
+{% endblock %}

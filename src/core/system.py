@@ -649,6 +649,20 @@ class EmailTelegramSystem:
         # на основе их последней успешной операции (например, проверки почты или обработки сообщения)
         pass
 
+def check_maintenance_mode():
+    maintenance_file = "/app/data/.maintenance_mode"
+    if os.path.exists(maintenance_file):
+        try:
+            with open(maintenance_file, 'r') as f:
+                timestamp = int(f.read().strip())
+            # Если файл старше 15 минут, игнорируем его
+            if time.time() - timestamp > 900:
+                os.remove(maintenance_file)
+                return False
+            return True
+        except:
+            return True
+    return False
 
 def signal_handler(sig: int, frame) -> None:
     """
@@ -684,8 +698,13 @@ def main() -> None:
         if system.start():
             # Основной цикл
             try:
-                # Просто ждем, пока система работает
+                # Проверка файла обслуживания
                 while system.running:
+                    if check_maintenance_mode():
+                        logger.info("Работа приостановлена из-за обслуживания БД")
+                        time.sleep(5)
+                        continue
+
                     time.sleep(1)
             except KeyboardInterrupt:
                 logger.info("Работа программы прервана пользователем")

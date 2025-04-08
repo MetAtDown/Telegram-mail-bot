@@ -473,65 +473,34 @@ def close_all_connections():
 
 
 def optimize_database(db_path: str = None) -> bool:
-    """
-    Выполняет оптимизацию базы данных.
-
-    Args:
-        db_path: Путь к файлу базы данных
-
-    Returns:
-        True при успешном выполнении, False при ошибке
-    """
     if db_path is None:
         db_path = settings.DATABASE_PATH
 
-    if not Path(db_path).exists():
-        logger.error(f"База данных не найдена: {db_path}")
-        return False
-
+    # Create a lock file to signal optimization is in progress
+    lock_file = Path(f"{db_path}.optimize.lock")
     try:
-        # Сначала закрываем все соединения
+        with open(lock_file, 'w') as f:
+            f.write(str(int(time.time())))
+
+        # Close all connections from this process
         close_all_connections()
 
-        # Создаем новое изолированное соединение
-        conn = sqlite3.connect(db_path, isolation_level="EXCLUSIVE", timeout=60)
+        # Create a completely new connection with a short timeout
+        # This avoids blocking indefinitely
+        conn = sqlite3.connect(db_path, timeout=5)
         cursor = conn.cursor()
 
-        # Проверка целостности базы данных
-        logger.info("Проверка целостности базы данных...")
-        cursor.execute("PRAGMA integrity_check")
-        integrity_result = cursor.fetchone()[0]
-        if integrity_result != "ok":
-            logger.warning(f"Проверка целостности БД: {integrity_result}")
-
-        # Очистка WAL файла
-        logger.info("Очистка WAL файла...")
-        cursor.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-
-        # VACUUM для уменьшения размера файла базы данных
-        logger.info("Выполнение VACUUM...")
-        cursor.execute("VACUUM")
-
-        # Анализ для оптимизации запросов
-        logger.info("Выполнение ANALYZE...")
-        cursor.execute("ANALYZE")
-
-        # Оптимизация индексов
-        logger.info("Оптимизация индексов...")
+        # Simple critical optimizations only
+        logger.info("Performing minimal optimization...")
+        cursor.execute("PRAGMA wal_checkpoint(RESTART)")
         cursor.execute("PRAGMA optimize")
-
-        # Сброс на ROLLBACK-журнал и обратно на WAL для очистки файлов
-        logger.info("Переключение режимов журнала...")
-        cursor.execute("PRAGMA journal_mode=DELETE")
-        cursor.execute("PRAGMA journal_mode=WAL")
-
+        conn.commit()
         conn.close()
 
-        # Устанавливаем флаг сброса пула соединений
-        set_global_reset_flag(True)
-
-        logger.info(f"База данных {db_path} успешно оптимизирована")
         return True
     except sqlite3.Error as e:
-        logger.error(f"Ошибка при оптимизации базы данных: {e}")
+        logger.error(f"Error optimizing database: {e}")
         return False
+    finally:
+        if lock_file.exists():
+            lock_file.unlink()

@@ -1,0 +1,41 @@
+version: '3.8' 
+
+services:
+  # --- Сервис приложения ---
+  telegram-mail-system:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-mail-system
+    volumes:
+      # Используем именованные тома Docker для данных и логов
+      - app_data:/app/data          # Данные (БД, сессии и т.д.) будут в томе 'app_data'
+      - app_logs:/app/logs          # Логи будут в томе 'app_logs'
+      # Монтируем .env файл только для чтения
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+    # user: root 
+
+  # --- Сервис Nginx ---
+  nginx:
+    image: nginx:alpine # Используем alpine версию Nginx
+    container_name: nginx-proxy
+    ports:
+      - "80:80" # Пробрасываем порт 80 с хоста на порт 80 контейнера Nginx
+    volumes:
+      # Монтируем конфиг Nginx внутрь контейнера (только для чтения)
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Монтируем файл с паролями для Basic Auth (только для чтения)
+      - ./nginx/.htpasswd:/etc/nginx/.htpasswd:ro
+      # Опционально: можно монтировать логи Nginx на хост или в том Docker
+      # - ./nginx/logs:/var/log/nginx
+    depends_on:
+      # Nginx будет стартовать только после старта приложения
+      - telegram-mail-system
+    restart: unless-stopped
+
+# --- Определение именованных томов ---
+
+volumes:
+  app_data:  # Том для /app/data
+  app_logs:  # Том для /app/logs

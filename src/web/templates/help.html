@@ -20,15 +20,54 @@
                 <li><strong>Пользователи</strong> - информация о зарегистрированных пользователях в боте. Через эту вкладку также осуществляется добавление новых пользователей и редактирование текущих (через кнопку Подробнее);</li>
                 <li><strong>Добавить пользователя</strong> - вкладка для быстрого добавления пользователей;</li>
                 <li><strong>Статус бота</strong> - осуществляется управление TG ботом, а также предоставляется общая информация о работе бота и его функционале;</li>
-                <li><strong>SQL - Консоль</strong> - Чтобы посмотреть быстро всю нужную информацию по пользователям. Используется SQLite;</li>
+                <li><strong>SQL - Консоль</strong> - позволяет выполнять SQL-запросы для быстрого доступа к данным. Доступность функций зависит от роли пользователя;</li>
                 <li><strong>Справка</strong> - информация об общей функциональности данного веб приложения (вы тут).</li>
+                {% if session.get('user_role') == 'admin' %}
+                <li><strong>Администраторы</strong> - управление учетными записями администраторов системы (доступно только для администраторов).</li>
+		<li><strong>Диагностика</strong> - системная информация и оптимизация БД (доступно только для администраторов).</li>
+                {% endif %}
+            </ul>
+        </div>
+        
+        <h2>Разделение ролей в системе</h2>
+        <div class="help-section">
+            <h3>1. Viewer (Читатель)</h3>
+            <ul>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Просмотр интерфейса и данных</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Изменение пользователей/тем</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление ботом</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Выполнение SQL-запросов</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление админками</li>
+            </ul>
+            
+            <h3>2. Operator (Оператор)</h3>
+            <ul>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Просмотр интерфейса и данных</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Добавление/редактирование пользователей и тем</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Управление ботом (старт/стоп)</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Выполнение SELECT-запросов</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Выполнение DDL/DML запросов</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление админками</li>
+            </ul>
+            
+            <h3>3. Admin (Администратор)</h3>
+            <ul>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Полный доступ ко всем функциям</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Управление учетными записями админки</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Выполнение любых SQL-запросов</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Оптимизация базы данных</li>
             </ul>
         </div>
         
         <h2>Как называется бот и его функционал</h2>
         <div class="help-section">
-            <p>Бота можно найти вбив в строке поиска в Telegram: @SuperSetDryBot</p>
-            <p>Там можно ознакомиться с его функционалом</p>
+            <p>Бота можно найти вбив в строке поиска в Telegram: <strong>@SuperSetDryBot</strong></p>
+            <p>Функциональность бота:</p>
+            <ul>
+                <li>Пересылка отчетов с почты на Telegram пользователей</li>
+                <li>Фильтрация писем по темам для каждого пользователя</li>
+                <li>Отображение chat ID для регистрации в системе</li>
+            </ul>
         </div>
         
         <h2>Как происходит добавление пользователей?</h2>
@@ -41,6 +80,18 @@
                 <li>Отчеты с почты начнут пересылаться с почты на его телеграм аккаунт клиента.</li>
             </ol>
             <p class="help-note">* Важно: чтобы отчеты стали приходить, сначала их нужно создать в SuperSet и настроить пересылку на почту.</p>
+        </div>
+
+        <h2>Работа с журналом активности</h2>
+        <div class="help-section">
+            <p>Система ведет журнал всех важных действий пользователей:</p>
+            <ul>
+                <li>Вход и выход из системы</li>
+                <li>Создание и редактирование пользователей</li>
+                <li>Управление ботом (запуск/остановка)</li>
+                <li>Выполнение SQL-запросов</li>
+            </ul>
+            <p>Доступ к журналу активности имеют только администраторы через специальный раздел в меню администраторов.</p>
         </div>
     </div>
 </div>

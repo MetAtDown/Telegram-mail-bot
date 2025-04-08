@@ -1,0 +1,80 @@
+{% extends 'base.html' %}
+
+{% block title %}Журнал активности | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Журнал активности</h1>
+    <a href="{{ url_for('admin_users') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> К списку администраторов
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">История действий пользователей</div>
+    <div class="panel-body">
+        <table class="users-table">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Пользователь</th>
+                    <th>Действие</th>
+                    <th>Дата и время</th>
+                    <th>IP-адрес</th>
+                    <th>Ресурс</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for log in logs %}
+                <tr>
+                    <td>{{ log.id }}</td>
+                    <td>{{ log.username }}</td>
+                    <td>
+                        {% set action = log.action %}
+                        {% if 'login' in action %}
+                        <span class="status-text active">Вход в систему</span>
+                        {% elif 'logout' in action %}
+                        <span class="status-text inactive">Выход из системы</span>
+                        {% elif 'delete' in action %}
+                        <span class="status-text inactive">Удаление</span>
+                        {% elif 'edit' in action %}
+                        <span class="status-text" style="background-color: var(--yellow); color: #000;">Изменение</span>
+                        {% elif 'add' in action or 'create' in action %}
+                        <span class="status-text active">Создание</span>
+                        {% elif 'bot' in action %}
+                        <span class="status-text" style="background-color: var(--primary); color: #000;">Действие с ботом</span>
+                        {% else %}
+                        {{ action }}
+                        {% endif %}
+                    </td>
+                    <td>{{ log.timestamp }}</td>
+                    <td>{{ log.ip_address or 'Н/Д' }}</td>
+                    <td>{{ log.resource or 'Н/Д' }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="6" class="text-center">Записи не найдены</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        
+        {% if total_pages > 1 %}
+        <div class="pagination">
+            {% if page > 1 %}
+            <a href="{{ url_for('activity_log', page=page-1) }}" class="pagination-item"><<</a>
+            {% endif %}
+            
+            {% for i in range(1, total_pages + 1) %}
+            <a href="{{ url_for('activity_log', page=i) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+            {% endfor %}
+            
+            {% if page < total_pages %}
+            <a href="{{ url_for('activity_log', page=page+1) }}" class="pagination-item">>></a>
+            {% endif %}
+        </div>
+        <div class="pagination-info">Страница {{ page }} из {{ total_pages }}</div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

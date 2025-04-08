@@ -1,498 +1,379 @@
-import json
+# src/core/bot_status.py
 import subprocess
-import sys
-import psutil
-import signal
-import functools
-import threading
-import time
 import os
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Tuple, Any, Optional, List, Set
+from typing import Dict, Any, Optional, Tuple
+import psutil
 
 from src.utils.logger import get_logger
 from src.config import settings
 
-# Настройка логирования
 logger = get_logger("bot_status")
 
-# Определение пути к файлу статуса бота
-STATUS_FILE_PATH = Path(settings.DATA_DIR) / 'bot_status.json'
+# --- НАСТРОЙКИ ---
+# Получаем имя программы из настроек или используем 'bot' по умолчанию
+# Убедись, что в settings есть SUPERVISOR_BOT_PROGRAM_NAME или измени 'bot' на правильное имя
+SUPERVISOR_PROGRAM_NAME = getattr(settings, 'SUPERVISOR_BOT_PROGRAM_NAME', 'bot')
+# Путь к старому PID файлу (только для fallback метода)
+PID_FILE = Path(settings.DATA_DIR) / '.bot_pid'
 
-# Кэш для статуса процесса и меток времени
-_cache_lock = threading.RLock()
-_status_cache = {}
-_cache_timestamp = 0
-_cache_lifetime = 10  # секунд
+# --- Хелпер для вызова supervisorctl ---
 
-# Блокировка для операций с файлами
-_file_lock = threading.RLock()
-
-
-def with_file_lock(func):
-    """Декоратор для защиты операций с файлами"""
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        with _file_lock:
-            return func(*args, **kwargs)
-
-    return wrapper
-
-
-def with_cache_lock(func):
-    """Декоратор для защиты операций с кэшем"""
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        with _cache_lock:
-            return func(*args, **kwargs)
-
-    return wrapper
-
-
-@with_file_lock
-def update_status_file(status_data: Dict[str, Any]) -> bool:
+def _run_supervisorctl(action: str, program_name: str = SUPERVISOR_PROGRAM_NAME) -> Tuple[bool, str]:
     """
-    Обновляет файл статуса бота атомарно.
+    Выполняет команду supervisorctl и возвращает кортеж (успех, вывод).
+    Успех определяется не только кодом возврата, но и анализом вывода для start/stop.
 
     Args:
-        status_data: Данные о статусе бота для записи в файл
+        action (str): Команда для supervisorctl (start, stop, status, restart).
+        program_name (str): Имя программы в Supervisor.
 
     Returns:
-        True в случае успешного обновления, False в случае ошибки
+        Tuple[bool, str]: Кортеж (True если успешно, False если ошибка, Строка с выводом stdout/stderr).
     """
-    try:
-        # Создаем директорию, если она не существует
-        STATUS_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-        # Записываем во временный файл и затем переименовываем для атомарности
-        temp_file = STATUS_FILE_PATH.with_suffix('.tmp')
-        with open(temp_file, 'w', encoding='utf-8') as f:
-            json.dump(status_data, f, ensure_ascii=False, indent=2)
-
-        # Переименовываем файл (атомарная операция на большинстве файловых систем)
-        temp_file.replace(STATUS_FILE_PATH)
-
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка при обновлении файла статуса: {e}")
-        return False
-
-
-def format_uptime(seconds: int) -> str:
-    """
-    Форматирует время работы бота в удобочитаемый формат.
-
-    Args:
-        seconds: Количество секунд работы
-
-    Returns:
-        Отформатированное время работы (ДД:ЧЧ:ММ:СС)
-    """
-    if seconds < 0:
-        return "Неизвестно"
+    if not program_name:
+        err_msg = "Имя программы Supervisor не задано (SUPERVISOR_BOT_PROGRAM_NAME в настройках)."
+        logger.error(err_msg)
+        return False, err_msg
 
     try:
-        days, remainder = divmod(seconds, 86400)
-        hours, remainder = divmod(remainder, 3600)
-        minutes, seconds = divmod(remainder, 60)
+        # Формируем команду
+        command = ['supervisorctl', action, program_name]
+        logger.info(f"Выполнение команды Supervisor: {' '.join(command)}")
 
-        if days > 0:
-            return f"{days}д {hours:02}:{minutes:02}:{seconds:02}"
-        else:
-            return f"{hours:02}:{minutes:02}:{seconds:02}"
-    except Exception as e:
-        logger.error(f"Ошибка при форматировании времени работы: {e}")
-        return "Неизвестно"
+        # Выполняем с таймаутом, не бросаем исключение при ошибке (check=False)
+        result = subprocess.run(
+            command,
+            check=False,          # Не бросать исключение при ненулевом коде возврата
+            capture_output=True,  # Захватывать stdout и stderr
+            text=True,            # Работать с текстом (Python 3.7+)
+            timeout=15            # Таймаут 15 секунд
+        )
 
+        # Объединяем stdout и stderr для анализа и логирования
+        output = (result.stdout or "").strip()
+        error_output = (result.stderr or "").strip()
+        full_output = f"STDOUT:\n{output}\nSTDERR:\n{error_output}".strip()
+        logger.debug(f"Supervisorctl {action} {program_name} raw output:\n{full_output}")
 
-@with_cache_lock
-def _get_cached_process_info() -> Tuple[bool, Optional[int], Optional[float]]:
-    """
-    Возвращает кэшированную информацию о процессе бота.
-
-    Returns:
-        Кортеж (бот_запущен, pid, время_создания_процесса)
-    """
-    global _status_cache, _cache_timestamp, _cache_lifetime
-
-    current_time = time.time()
-    if current_time - _cache_timestamp <= _cache_lifetime and _status_cache:
-        return _status_cache.get('running', False), _status_cache.get('pid'), _status_cache.get('create_time')
-
-    # Если кэш устарел, возвращаем None, чтобы вызвать обновление
-    return None, None, None
-
-
-@with_cache_lock
-def _update_process_cache(running: bool, pid: Optional[int], create_time: Optional[float]) -> None:
-    """
-    Обновляет кэш информации о процессе.
-
-    Args:
-        running: Состояние бота (запущен/остановлен)
-        pid: ID процесса
-        create_time: Время создания процесса
-    """
-    global _status_cache, _cache_timestamp, _cache_lifetime
-
-    _status_cache = {
-        'running': running,
-        'pid': pid,
-        'create_time': create_time
-    }
-    _cache_timestamp = time.time()
-
-
-def find_python_processes() -> List[Dict[str, Any]]:
-    """
-    Находит только процессы Python в системе.
-
-    Returns:
-        Список процессов Python с необходимой информацией
-    """
-    python_processes = []
-
-    try:
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
-            try:
-                # Проверяем, является ли процесс Python
-                proc_info = proc.as_dict(['pid', 'name', 'cmdline', 'create_time'])
-                if proc_info['name'] and (
-                        'python' in proc_info['name'].lower() or 'python3' in proc_info['name'].lower()):
-                    python_processes.append(proc_info)
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                continue
-    except Exception as e:
-        logger.error(f"Ошибка при поиске Python процессов: {e}")
-
-    return python_processes
-
-
-def find_bot_process() -> Tuple[bool, Optional[int], Optional[float]]:
-    """Находит процесс бота и возвращает его PID и время создания."""
-    # Сначала проверяем кэш
-    cached_running, cached_pid, cached_create_time = _get_cached_process_info()
-    if cached_running is not None and cached_pid:
-        try:
-            proc = psutil.Process(cached_pid)
-            # Проверяем, это тот же процесс по времени создания
-            if cached_create_time and abs(proc.create_time() - cached_create_time) < 0.1:
-                return True, cached_pid, cached_create_time
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass  # Процесс не существует или недоступен
-
-    try:
-        python_processes = find_python_processes()
-        logger.debug(f"Найдено {len(python_processes)} Python процессов")
-
-        for proc_info in python_processes:
-            try:
-                pid = proc_info['pid']
-                cmdline = proc_info.get('cmdline', [])
-
-                # Формируем строку для поиска
-                cmd_str = ' '.join([str(cmd) for cmd in cmdline if cmd])
-                logger.debug(f"PID {pid}: {cmd_str[:150]}")
-
-                # ИСПРАВЛЕНИЕ: Более широкий поиск
-                if 'system.py' in cmd_str:
-                    logger.info(f"Найден процесс бота с PID={pid}: {cmd_str[:150]}")
-                    create_time = proc_info.get('create_time', time.time())
-                    _update_process_cache(True, pid, create_time)
-                    return True, pid, create_time
-            except Exception as e:
-                logger.debug(f"Ошибка при проверке процесса {proc_info.get('pid')}: {e}")
-                continue
-
-        return False, None, None
-    except Exception as e:
-        logger.error(f"Ошибка при поиске процесса бота: {e}")
-        return False, None, None
-
-
-def get_bot_status(bypass_cache: bool = False) -> Dict[str, Any]:
-    """
-    Получает статус бота путем проверки запущенных процессов.
-    Оптимизировано с использованием кэширования.
-
-    Args:
-        bypass_cache: Игнорировать кэшированные данные и выполнить проверку процессов
-
-    Returns:
-        Словарь со статусом бота и дополнительной информацией
-    """
-    now = datetime.now()
-
-    try:
-        # Проверяем бота через процессы
-        bot_running, pid, create_time = find_bot_process()
-
-        # Определяем время начала работы
-        start_time = None
-        uptime_seconds = 0
-        uptime_str = "Неизвестно"
-
-        # Проверяем наличие файла статуса
-        if STATUS_FILE_PATH.exists():
-            try:
-                with open(STATUS_FILE_PATH, 'r', encoding='utf-8') as f:
-                    status_data = json.load(f)
-
-                # Если бот запущен, проверяем время запуска
-                if bot_running:
-                    if create_time:
-                        # Используем время создания процесса
-                        start_time = create_time
-                    elif status_data.get('start_time'):
-                        # Или берем из сохраненного файла
-                        start_time = status_data.get('start_time')
-                    else:
-                        # Или используем текущее время
-                        start_time = now.timestamp()
-                else:
-                    # Если бот остановлен, сбрасываем время
-                    start_time = None
-            except Exception as e:
-                logger.error(f"Ошибка при чтении файла статуса: {e}")
-                # При ошибке чтения файла - стандартные значения
-                if bot_running and create_time:
-                    start_time = create_time
-                else:
-                    start_time = None
-        else:
-            # Если файла нет, но бот запущен - используем время создания процесса
-            if bot_running and create_time:
-                start_time = create_time
+        # Определяем успех операции
+        success = False
+        if result.returncode == 0:
+            # Команда выполнена без системной ошибки
+            if action == 'status':
+                 # Для status любой успешный вызов - это успех
+                 success = True
+            elif action == 'start':
+                 if f"{program_name}: started" in output or "already started" in output:
+                      success = True
+                 # Если нет ошибки в stderr, тоже считаем успехом (может не быть вывода)
+                 elif not error_output:
+                      success = True
+            elif action == 'stop':
+                 if f"{program_name}: stopped" in output or "not running" in output:
+                      success = True
+                 elif not error_output:
+                      success = True
+            elif action == 'restart':
+                 # Успешный restart должен содержать stopped и started
+                 if "stopped" in output and "started" in output:
+                      success = True
+                 # Или если он только запустил остановленный процесс
+                 elif "started" in output and ("not running" in output or "stopped" not in output):
+                      success = True
+                 elif not error_output:
+                     success = True # Если нет ошибок, предполагаем успех
             else:
-                start_time = None
+                 # Для других команд просто проверяем код возврата
+                 success = True
+        else:
+            # Команда завершилась с ошибкой (ненулевой код возврата)
+            # Проверяем особые случаи, которые могут быть не ошибками
+             if action == 'stop' and "not running" in error_output:
+                  success = True # Пытались остановить то, что не запущено - это нормально
+             elif action == 'start' and "already started" in error_output:
+                  success = True # Пытались запустить то, что уже запущено - нормально
+             elif f"No such process group '{program_name}'" in error_output:
+                  logger.error(f"Программа '{program_name}' не найдена в Supervisor.")
+                  success = False # Явная ошибка конфигурации
+             else:
+                  success = False # Другая ошибка
 
-        # Вычисляем uptime
-        if bot_running and start_time:
-            uptime_seconds = int(now.timestamp() - start_time)
-            uptime_str = format_uptime(uptime_seconds)
+        # Логируем ошибку, если операция не удалась
+        if not success:
+            logger.error(f"Команда 'supervisorctl {action} {program_name}' НЕ УДАЛАСЬ. Code: {result.returncode}, Output: {full_output}")
 
-        # Создаем новые данные о статусе
-        status_data = {
-            'running': bot_running,
-            'forwarder_active': bot_running,
-            'bot_active': bot_running,
-            'updated_at': now.isoformat(),
-            'start_time': start_time,
-            'uptime_seconds': uptime_seconds,
-            'uptime': uptime_str,
-            'pid': pid
-        }
+        # Возвращаем результат и полный вывод
+        return success, full_output
 
-        # Сохраняем новые данные в файл
-        update_status_file(status_data)
-
-        return {
-            'running': bot_running,
-            'forwarder_active': bot_running,
-            'bot_active': bot_running,
-            'last_check': now.isoformat(),
-            'uptime': uptime_str,
-            'uptime_seconds': uptime_seconds,
-            'pid': pid,
-            'status_source': 'process_check'
-        }
-
+    except FileNotFoundError:
+        err_msg = f"Команда 'supervisorctl' не найдена. Убедитесь, что supervisor установлен и доступен в $PATH контейнера/системы."
+        logger.error(err_msg)
+        return False, err_msg
+    except subprocess.TimeoutExpired:
+        err_msg = f"Тайм-аут ({15} сек) выполнения команды 'supervisorctl {action} {program_name}'."
+        logger.error(err_msg)
+        return False, err_msg
     except Exception as e:
-        logger.error(f"Ошибка при получении статуса бота: {e}")
-        return {
-            'running': False,
-            'forwarder_active': False,
-            'bot_active': False,
-            'last_check': now.isoformat(),
-            'uptime': 'Неизвестно',
-            'uptime_seconds': 0,
-            'error': str(e),
-            'status_source': 'error'
-        }
+        err_msg = f"Неожиданная ошибка при выполнении 'supervisorctl {action} {program_name}': {e}"
+        logger.error(err_msg, exc_info=True)
+        return False, err_msg
 
+
+# --- Основные функции ---
 
 def start_bot() -> bool:
-    """Запуск бота, если он не запущен."""
-    try:
-        # Проверяем, запущен ли уже бот
-        bot_running, _, _ = find_bot_process()
-        if bot_running:
-            logger.info("Бот уже запущен, повторный запуск не требуется")
-            return True
-
-        # Формируем путь к скрипту запуска
-        script_path = Path(__file__).parent.parent / 'core' / 'system.py'
-        abs_script_path = str(script_path.resolve())
-        logger.info(f"Запуск бота с абсолютным путем: {abs_script_path}")
-
-        # Проверяем существование файла
-        if not script_path.exists():
-            logger.error(f"Файл скрипта не найден: {abs_script_path}")
-            return False
-
-        # Используем полный путь к python.exe
-        python_exe = sys.executable
-        logger.info(f"Используемый интерпретатор Python: {python_exe}")
-
-        # Получаем текущую директорию проекта
-        project_dir = Path(__file__).resolve().parent.parent.parent
-        logger.info(f"Директория проекта: {project_dir}")
-
-        # Запуск процесса
-        try:
-            # На Windows используем другой метод создания процесса
-            startupinfo = None
-            if os.name == 'nt':
-                import subprocess
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-
-            process = subprocess.Popen(
-                [python_exe, abs_script_path],
-                cwd=str(project_dir),  # Установка рабочей директории
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                stdin=subprocess.DEVNULL,
-                startupinfo=startupinfo,  # Только для Windows
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
-            )
-
-            # Ждем немного, чтобы процесс успел запуститься
-            time.sleep(3)
-
-            # Проверка на немедленное завершение
-            if process.poll() is not None:
-                stdout, stderr = process.communicate(timeout=5)
-                logger.error(f"Процесс завершился с кодом: {process.returncode}")
-                logger.error(f"Вывод: {stderr.decode('utf-8', errors='ignore')}")
-                return False
-
-            # Активное ожидание появления процесса
-            pid = process.pid
-            logger.info(f"Запущен процесс с PID: {pid}")
-
-            # Проверяем через find_bot_process и также напрямую
-            for attempt in range(10):  # Увеличено до 10 попыток
-                bot_running, found_pid, _ = find_bot_process()
-                if bot_running:
-                    logger.info(f"Бот успешно запущен, обнаружен с PID: {found_pid}")
-                    return True
-
-                # Проверяем, существует ли процесс с нашим PID
-                if psutil.pid_exists(pid):
-                    logger.info(f"Процесс {pid} существует, но не определяется как бот")
-
-                time.sleep(1)
-
-            logger.error("Бот не обнаружен в списке процессов после запуска")
-            return False
-
-        except Exception as e:
-            logger.error(f"Ошибка при запуске процесса: {e}")
-            return False
-
-    except Exception as e:
-        logger.error(f"Ошибка при запуске бота: {e}")
-        return False
-
+    """Запускает бота через Supervisor."""
+    logger.info(f"Отправка команды Supervisor на запуск программы '{SUPERVISOR_PROGRAM_NAME}'...")
+    success, output = _run_supervisorctl('start')
+    if success:
+        logger.info(f"Запрос на запуск успешно отправлен Supervisor'у. Ответ: {output}")
+    # Ошибка уже залогирована в _run_supervisorctl
+    return success
 
 def stop_bot() -> bool:
-    """Останавливает бота, если он запущен."""
-    try:
-        bot_running, pid, _ = find_bot_process()
-        logger.info(f"Попытка остановки бота (запущен: {bot_running}, PID: {pid})")
-
-        if bot_running and pid:
-            # Попытка корректного завершения
-            logger.info(f"Отправка SIGTERM процессу {pid}")
-            try:
-                os.kill(pid, signal.SIGTERM)
-
-                # Ждем завершения
-                for _ in range(10):  # 10 секунд ожидания
-                    time.sleep(1)
-                    if not psutil.pid_exists(pid):
-                        logger.info(f"Процесс {pid} успешно завершен")
-                        break
-
-                # Если процесс все еще существует, завершаем принудительно
-                if psutil.pid_exists(pid):
-                    logger.warning(f"Процесс {pid} не завершился. Отправка SIGKILL")
-                    os.kill(pid, signal.SIGKILL)
-                    time.sleep(1)
-            except ProcessLookupError:
-                logger.info(f"Процесс {pid} уже завершен")
-            except Exception as e:
-                logger.error(f"Ошибка при отправке сигнала процессу {pid}: {e}")
-                return False
-
-            # Обновляем статус файл
-            now = datetime.now()
-            status_data = {
-                'running': False,
-                'forwarder_active': False,
-                'bot_active': False,
-                'updated_at': now.isoformat(),
-                'start_time': None,
-                'uptime_seconds': 0,
-                'uptime': 'Неизвестно'
-            }
-            update_status_file(status_data)
-
-            # Сбрасываем кэш
-            _update_process_cache(False, None, None)
-            return True
-
-        logger.warning("Попытка остановки бота, который не запущен")
-        return True  # Считаем успешным, если бот и так не запущен
-    except Exception as e:
-        logger.error(f"Ошибка при остановке бота: {e}")
-        return False
+    """Останавливает бота через Supervisor."""
+    logger.info(f"Отправка команды Supervisor на остановку программы '{SUPERVISOR_PROGRAM_NAME}'...")
+    success, output = _run_supervisorctl('stop')
+    if success:
+        logger.info(f"Запрос на остановку успешно отправлен Supervisor'у. Ответ: {output}")
+        # Даем Supervisor'у время на выполнение остановки
+        time.sleep(1.5)
+        # Удаляем старый PID файл, если он вдруг остался
+        PID_FILE.unlink(missing_ok=True)
+    # Ошибка уже залогирована в _run_supervisorctl
+    return success
 
 def restart_bot() -> bool:
+    """Перезапускает бота через Supervisor."""
+    logger.info(f"Отправка команды Supervisor на перезапуск программы '{SUPERVISOR_PROGRAM_NAME}'...")
+    success, output = _run_supervisorctl('restart')
+    if success:
+        logger.info(f"Запрос на перезапуск успешно отправлен Supervisor'у. Ответ: {output}")
+        time.sleep(1) # Небольшая пауза после запроса
+    # Ошибка уже залогирована в _run_supervisorctl
+    return success
+
+def get_bot_status(bypass_cache=False) -> dict: # bypass_cache не используется с supervisorctl
     """
-    Перезапускает бота с подтверждением запуска.
-
-    Returns:
-        True если бот успешно перезапущен, иначе False
+    Получает статус бота через Supervisor.
+    При ошибках supervisorctl пытается использовать резервный метод (PID файл).
     """
-    logger.info("Перезапуск бота...")
+    now_iso = datetime.now().isoformat()
+    status_info = {
+        'running': False,
+        'forwarder_active': False, # Считаем эквивалентным running
+        'bot_active': False,       # Считаем эквивалентным running
+        'pid': None,
+        'uptime': 'Неизвестно',
+        'uptime_seconds': 0,
+        'last_check': now_iso,
+        'error': None,
+        'status_source': 'supervisor' # Источник по умолчанию
+    }
 
-    # Останавливаем бота
-    stop_successful = stop_bot()
-    if not stop_successful:
-        logger.warning("Не удалось корректно остановить бота, продолжаем с запуском")
+    # Выполняем команду supervisorctl status
+    success, output = _run_supervisorctl('status')
 
-    # Делаем паузу для корректного освобождения ресурсов
-    time.sleep(3)
+    # --- Обработка ошибок supervisorctl и Fallback ---
+    if not success:
+        if "'supervisorctl' не найдена" in output:
+            status_info['error'] = "supervisorctl не найден"
+            status_info['status_source'] = 'pid_fallback_supervisor_missing'
+            logger.warning(f"{status_info['error']}. Используется резервный метод (PID).")
+            status_info.update(get_bot_status_pid_fallback()) # Обновляем словарь результатом fallback
+            return status_info # Возвращаем результат fallback
+        elif f"No such process group '{SUPERVISOR_PROGRAM_NAME}'" in output \
+          or f"no such process group" in output: # Доп. проверка
+            status_info['error'] = f"Программа '{SUPERVISOR_PROGRAM_NAME}' не найдена в Supervisor."
+            status_info['status_source'] = 'pid_fallback_supervisor_no_program'
+            logger.error(status_info['error'])
+            # Пытаемся найти процесс по PID файлу в этом случае
+            status_info.update(get_bot_status_pid_fallback())
+            return status_info # Возвращаем результат fallback
+        else:
+            # Другая ошибка supervisorctl
+            status_info['error'] = f"Ошибка supervisorctl status: {output}"
+            status_info['status_source'] = 'supervisor_error'
+            logger.error(status_info['error'])
+            # Здесь можно решить, возвращать ошибку или пробовать fallback
+            # Попробуем fallback:
+            logger.warning("Попытка использовать резервный метод (PID).")
+            status_info.update(get_bot_status_pid_fallback())
+            # Добавляем информацию об исходной ошибке supervisor
+            if status_info.get('error'): # Если fallback тоже дал ошибку
+                 status_info['error'] = f"Supervisor Error: {output}; Fallback Error: {status_info['error']}"
+            else:
+                 status_info['error'] = f"Supervisor Error: {output}"
+                 status_info['status_source'] = 'pid_fallback_supervisor_error'
+            return status_info
 
-    # Запускаем бота
-    start_successful = start_bot()
-    if not start_successful:
-        logger.error("Не удалось запустить бота после остановки")
-        return False
+    # --- Парсинг успешного вывода supervisorctl status ---
+    try:
+        status_line = ""
+        # Ищем строку, начинающуюся с имени нашей программы
+        for line in output.splitlines():
+             # Используем strip() для удаления лишних пробелов в начале/конце
+             stripped_line = line.strip()
+             if stripped_line.startswith(SUPERVISOR_PROGRAM_NAME):
+                  # Найдена строка статуса для нашей программы
+                  status_line = stripped_line
+                  break # Достаточно первой найденной строки
 
-    # Проверяем, действительно ли бот запущен
-    for i in range(5):  # Проверяем 5 раз с интервалом 1 секунда
-        bot_running, _, _ = find_bot_process()
-        if bot_running:
-            logger.info("Бот успешно перезапущен")
-            return True
-        time.sleep(1)
+        if not status_line:
+             status_info['error'] = f"Не найдена строка статуса для '{SUPERVISOR_PROGRAM_NAME}' в выводе supervisorctl."
+             status_info['status_source'] = 'supervisor_parse_error'
+             logger.error(status_info['error'])
+             # Можно попробовать fallback
+             logger.warning("Попытка использовать резервный метод (PID).")
+             status_info.update(get_bot_status_pid_fallback())
+             if status_info.get('error'):
+                 status_info['error'] = f"Supervisor Parse Error; Fallback Error: {status_info['error']}"
+             else:
+                 status_info['error'] = f"Supervisor Parse Error"
+                 status_info['status_source'] = 'pid_fallback_supervisor_parse_error'
+             return status_info
 
-    logger.error("Бот не обнаружен в списке процессов после запуска")
-    return False
+        logger.debug(f"Найдена строка статуса Supervisor: {status_line}")
 
+        # Определяем статус и извлекаем PID и uptime
+        # Пример: bot RUNNING pid 123, uptime 1:23:45
+        parts = status_line.split()
+        # Первый элемент - имя программы, второй - статус
+        current_status = parts[1] if len(parts) > 1 else "UNKNOWN"
+
+        if current_status == "RUNNING":
+            status_info['running'] = True
+            status_info['forwarder_active'] = True
+            status_info['bot_active'] = True
+            # Ищем PID
+            try:
+                pid_index = parts.index('pid') + 1
+                # Убираем запятую, если она есть
+                status_info['pid'] = int(parts[pid_index].replace(',', ''))
+            except (ValueError, IndexError):
+                logger.warning(f"Не удалось извлечь PID из строки статуса: {status_line}")
+            # Ищем uptime
+            try:
+                uptime_index = parts.index('uptime') + 1
+                status_info['uptime'] = " ".join(parts[uptime_index:])
+                # TODO: Реализовать парсинг строки uptime в секунды, если нужно
+                # status_info['uptime_seconds'] = _parse_supervisor_uptime(status_info['uptime'])
+            except (ValueError, IndexError):
+                logger.warning(f"Не удалось извлечь uptime из строки статуса: {status_line}")
+
+        elif current_status in ["STARTING", "BACKOFF"]:
+            # Процесс запускается или в состоянии ожидания перед перезапуском
+            status_info['running'] = False # Считаем нестабильным
+            status_info['error'] = f"Статус Supervisor: {current_status}"
+        elif current_status in ["STOPPING", "STOPPED", "EXITED", "FATAL"]:
+            # Процесс остановлен или завершился с ошибкой
+            status_info['running'] = False
+        else:
+            # Неизвестный статус
+            status_info['running'] = False
+            status_info['error'] = f"Неизвестный статус Supervisor: {current_status}"
+            logger.warning(status_info['error'])
+
+    except Exception as e:
+        status_info['error'] = f"Ошибка парсинга вывода supervisorctl: {e}"
+        status_info['status_source'] = 'supervisor_parse_exception'
+        logger.error(status_info['error'], exc_info=True)
+        # Можно попробовать fallback
+        logger.warning("Попытка использовать резервный метод (PID).")
+        status_info.update(get_bot_status_pid_fallback())
+        if status_info.get('error'):
+            status_info['error'] = f"Supervisor Parse Exception: {e}; Fallback Error: {status_info['error']}"
+        else:
+            status_info['error'] = f"Supervisor Parse Exception: {e}"
+            status_info['status_source'] = 'pid_fallback_supervisor_parse_exception'
+
+    return status_info
 
 def is_bot_running() -> bool:
     """
-    Быстрая проверка, запущен ли бот.
+    Быстрая проверка, запущен ли бот (через get_bot_status).
 
     Returns:
-        True если бот запущен, иначе False
+        True если бот запущен (статус RUNNING в Supervisor), иначе False.
     """
-    bot_running, _, _ = find_bot_process()
-    return bot_running
+    status = get_bot_status()
+    # Проверяем именно 'running', т.к. get_bot_status его выставляет
+    return status.get('running', False)
+
+# Резервный метод (Fallback)
+def get_bot_status_pid_fallback() -> dict:
+    """
+    Резервный метод получения статуса через PID файл.
+    Используется, если supervisorctl недоступен или не находит программу.
+    """
+    status_info = {
+        'running': False, 'pid': None, 'uptime': 'Неизвестно',
+        'uptime_seconds': 0, 'last_check': datetime.now().isoformat(), 'error': None,
+        'status_source': 'pid_file' # Явно указываем источник
+    }
+    if not PID_FILE.exists():
+         status_info['error'] = f"PID файл не найден: {PID_FILE}"
+         return status_info
+
+    try:
+        pid_str = PID_FILE.read_text().strip()
+        if not pid_str:
+            status_info['error'] = "PID файл пуст."
+            return status_info
+
+        pid = int(pid_str)
+        if psutil.pid_exists(pid):
+            p = psutil.Process(pid)
+            # Добавим проверку имени процесса или командной строки для надежности
+            expected_cmd_part = 'system.py'
+            try:
+                 cmdline = ' '.join(p.cmdline())
+                 proc_name = p.name().lower()
+                 # Проверяем, что это python и содержит нужный скрипт
+                 if ('python' in proc_name or 'python3' in proc_name) and expected_cmd_part in cmdline:
+                      status_info['running'] = True
+                      status_info['pid'] = pid
+                      create_time = datetime.fromtimestamp(p.create_time())
+                      uptime_delta = datetime.now() - create_time
+                      status_info['uptime_seconds'] = int(uptime_delta.total_seconds())
+                      # Форматируем uptime
+                      seconds = status_info['uptime_seconds']
+                      days, rem = divmod(seconds, 86400)
+                      hours, rem = divmod(rem, 3600)
+                      minutes, sec = divmod(rem, 60)
+                      if days > 0:
+                          status_info['uptime'] = f"{int(days)}д {int(hours):02}:{int(minutes):02}:{int(sec):02}"
+                      else:
+                          status_info['uptime'] = f"{int(hours):02}:{int(minutes):02}:{int(sec):02}"
+                 else:
+                      status_info['error'] = f"PID {pid} найден, но процесс не соответствует ожидаемому боту (Имя: {proc_name}, CMD: {cmdline[:50]}...)"
+                      status_info['running'] = False # Явно указываем, что это не тот процесс
+            except (psutil.AccessDenied, OSError) as e:
+                 status_info['error'] = f"Нет доступа к информации о процессе {pid}: {e}"
+                 # Не можем быть уверены, работает ли он, оставляем running=False
+        else:
+            status_info['error'] = f"Процесс с PID {pid} из файла не найден."
+            # Удаляем старый PID файл
+            try:
+                PID_FILE.unlink()
+                logger.info(f"Удален устаревший PID файл: {PID_FILE}")
+            except OSError as e:
+                logger.warning(f"Не удалось удалить устаревший PID файл {PID_FILE}: {e}")
+
+    except ValueError:
+        status_info['error'] = f"Некорректное значение PID в файле: {PID_FILE}"
+    except FileNotFoundError:
+         # Уже проверили в начале, но на всякий случай
+         status_info['error'] = f"PID файл не найден: {PID_FILE}"
+    except (psutil.Error, IOError) as e:
+        status_info['error'] = f"Ошибка доступа к процессу или файлу PID: {e}"
+        logger.warning(f"Ошибка доступа при проверке PID файла: {e}")
+    except Exception as e:
+        status_info['error'] = f"Неожиданная ошибка при проверке PID файла: {e}"
+        logger.error(status_info['error'], exc_info=True)
+
+    return status_info
+

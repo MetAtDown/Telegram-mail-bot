@@ -33,6 +33,10 @@ logs/
 # Database
 *.db
 *.sqlite3
+*.optimize.lock
+.optimize_success
+.optimize_error
+.maintenance_mode
 
 # Web
 static/
@@ -41,3 +45,11 @@ static/
 # IDE
 .idea/
 .vscode/
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Nginx
+nginx/.htpasswd
+nginx/logs/

@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+
+{% block title %}Добавить администратора | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Добавить администратора</h1>
+    <a href="{{ url_for('admin_users') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> Назад к списку
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Новый администратор</div>
+    <div class="panel-body">
+        <form method="post" action="{{ url_for('add_admin_user') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            
+            <div class="form-group">
+                <label class="form-label">Имя пользователя</label>
+                <input type="text" name="username" class="form-control" placeholder="Введите имя пользователя" required>
+                <div class="hint-text">Используется для входа в систему</div>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">Пароль</label>
+                <input type="password" name="password" class="form-control" placeholder="Введите пароль" required>
+                <div class="hint-text">Используйте надежный пароль</div>
+            </div>
+            
+            <div class="form-group">
+                <label class="form-label">Роль</label>
+                <div class="radio-group">
+                    <label class="radio-label">
+                        <input type="radio" name="role" value="admin" style="display: none;">
+                        <span class="radio-custom"></span>
+                        Администратор (полный доступ)
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="role" value="operator" checked style="display: none;">
+                        <span class="radio-custom"></span>
+                        Оператор (изменение пользователей, запуск/остановка бота)
+                    </label>
+                    <label class="radio-label">
+                        <input type="radio" name="role" value="viewer" style="display: none;">
+                        <span class="radio-custom"></span>
+                        Наблюдатель (только просмотр)
+                    </label>
+                </div>
+            </div>
+            
+            <button type="submit" class="btn btn-primary">Добавить администратора</button>
+        </form>
+    </div>
+</div>
+{% endblock %}
