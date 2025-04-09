@@ -53,3 +53,4 @@ docker-compose.override.yml
 # Nginx
 nginx/.htpasswd
 nginx/logs/
+nginx/ssl/

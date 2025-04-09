@@ -89,9 +89,9 @@ app.config['SESSION_TYPE'] = 'filesystem'
 app.config['SESSION_FILE_DIR'] = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sessions')
 app.config['SESSION_PERMANENT'] = True
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=12)
-app.config['SESSION_COOKIE_SECURE'] = None  # Для HTTPS
+app.config['SESSION_COOKIE_SECURE'] = True  # Для HTTPS
 app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = None
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
 # Настройка кэширования
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = timedelta(hours=1)
