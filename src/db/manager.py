@@ -18,6 +18,12 @@ logger = get_logger("db_manager")
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 0.5  # в секундах
 
+# Константы для маски
+DELIVERY_MODE_TEXT = 'text'
+DELIVERY_MODE_HTML = 'html'
+DELIVERY_MODE_SMART = 'smart'
+ALLOWED_DELIVERY_MODES = {DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART}
+DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
 class DatabaseManager:
     _instance = None
@@ -347,16 +353,18 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 cursor = conn.cursor()
 
-                # Создание таблицы пользователей с индексом по статусу
-                cursor.execute('''
+                cursor.execute(f'''
                 CREATE TABLE IF NOT EXISTS users (
                     chat_id TEXT PRIMARY KEY,
-                    status TEXT DEFAULT 'Enable',
+                    status TEXT DEFAULT 'Enable' NOT NULL CHECK (status IN ('Enable', 'Disable')),
+                    delivery_mode TEXT DEFAULT '{DEFAULT_DELIVERY_MODE}' NOT NULL CHECK (delivery_mode IN ('{DELIVERY_MODE_TEXT}', '{DELIVERY_MODE_HTML}', '{DELIVERY_MODE_SMART}')),
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
                 ''')
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_users_status ON users (status)')
+                cursor.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_users_delivery_mode ON users (delivery_mode)')
 
                 # Создание таблицы тем писем с композитным индексом для ускорения поиска
                 cursor.execute('''
@@ -378,7 +386,29 @@ class DatabaseManager:
                 cursor.execute('CREATE INDEX IF NOT EXISTS idx_subjects_chat_id_subject ON subjects (chat_id, subject)')
 
                 conn.commit()
-                logger.info("База данных инициализирована успешно")
+                logger.info("База данных инициализирована успешно (проверена структура таблиц)")
+
+
+                cursor.execute("PRAGMA table_info(users)")
+                columns = [col['name'] for col in cursor.fetchall()]
+                if 'delivery_mode' not in columns:
+                    logger.warning("Столбец 'delivery_mode' отсутствует в таблице users. Добавляем...")
+                    try:
+                        conn.execute('BEGIN IMMEDIATE')
+                        cursor.execute(f'''
+                            ALTER TABLE users
+                            ADD COLUMN delivery_mode TEXT DEFAULT '{DEFAULT_DELIVERY_MODE}' NOT NULL CHECK (delivery_mode IN ('{DELIVERY_MODE_TEXT}', '{DELIVERY_MODE_HTML}', '{DELIVERY_MODE_SMART}'))
+                        ''')
+                        conn.commit()
+                        logger.info("Столбец 'delivery_mode' успешно добавлен в таблицу users.")
+                        self._clear_cache()
+                        self.release_connection()
+                    except Exception as alter_err:
+                        conn.rollback()
+                        logger.error(
+                            f"Не удалось добавить столбец 'delivery_mode': {alter_err}. Возможно, потребуется ручное вмешательство.")
+                        raise RuntimeError(f"Не удалось обновить схему БД: {alter_err}") from alter_err
+
         except Exception as e:
             logger.error(f"Ошибка при инициализации базы данных: {e}")
             raise
@@ -423,6 +453,94 @@ class DatabaseManager:
             logger.debug(f"Данные сохранены в кэше: {key}" +
                          (f", размер: {len(data) if isinstance(data, (list, dict)) else 'нескалярный'}"
                           if data is not None else ", пустые данные"))
+
+    def get_user_delivery_mode(self, chat_id: str) -> str:
+        """
+        Получение режима доставки длинных сообщений для пользователя.
+
+        Args:
+            chat_id: ID чата пользователя
+
+        Returns:
+            Режим доставки ('text', 'html', 'smart') или значение по умолчанию.
+        """
+        cache_key = f"user_delivery_mode_{chat_id}"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                query = '''
+                SELECT delivery_mode
+                FROM users
+                WHERE chat_id = ?
+                '''
+                cursor.execute(query, (chat_id,))
+                result = cursor.fetchone()
+
+                mode = result['delivery_mode'] if result and result['delivery_mode'] else DEFAULT_DELIVERY_MODE
+                logger.debug(f"Режим доставки для пользователя {chat_id}: {mode}")
+
+                # Сохраняем в кэш
+                self._set_in_cache(cache_key, mode)
+                return mode
+        except Exception as e:
+            logger.error(f"Ошибка при получении режима доставки для пользователя {chat_id}: {e}")
+            return DEFAULT_DELIVERY_MODE  # Возвращаем значение по умолчанию при ошибке
+
+    def update_user_delivery_mode(self, chat_id: str, mode: str) -> bool:
+        """
+        Обновление режима доставки для пользователя.
+
+        Args:
+            chat_id: ID чата пользователя
+            mode: Новый режим доставки ('text', 'html', 'smart')
+
+        Returns:
+            True если режим обновлен успешно, иначе False
+        """
+        if mode not in ALLOWED_DELIVERY_MODES:
+            logger.warning(f"Попытка установить неверный режим доставки '{mode}' для пользователя {chat_id}")
+            return False
+
+        try:
+            with self.get_connection() as conn:
+                # Явно начинаем транзакцию
+                conn.execute('BEGIN IMMEDIATE')
+                cursor = conn.cursor()
+
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                query = '''
+                UPDATE users
+                SET delivery_mode = ?, updated_at = ?
+                WHERE chat_id = ?
+                '''
+                cursor.execute(query, (mode, now, chat_id))
+                rows_affected = cursor.rowcount
+                conn.commit()  # Явный коммит
+
+                success = rows_affected > 0
+                logger.info(
+                    f"Обновление режима доставки пользователя {chat_id}: {mode}, успех: {success}, затронуто строк: {rows_affected}"
+                )
+
+                if success:
+                    # Очищаем кэш для этого пользователя
+                    self._clear_cache(f"user_delivery_mode_{chat_id}")
+                    # Можно также очистить кэш all_users, если он содержит delivery_mode
+                    self._clear_cache("all_users")  # На всякий случай
+
+                return success
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении режима доставки пользователя {chat_id}: {e}")
+            try:
+                # Попытка отката транзакции в случае ошибки
+                conn.rollback()
+            except Exception as rb_err:
+                logger.error(f"Ошибка при откате транзакции: {rb_err}")
+            return False
 
     def refresh_data(self):
         """Принудительное обновление всех кэшированных данных и сброс соединений."""
@@ -677,18 +795,27 @@ class DatabaseManager:
             logger.error(f"Ошибка при обновлении статуса пользователя {chat_id}: {e}")
             return False
 
-    def add_user(self, chat_id: str, status: str = 'Enable') -> bool:
+    def add_user(self, chat_id: str, status: str = 'Enable', delivery_mode: str = DEFAULT_DELIVERY_MODE) -> bool:
         """
-        Добавление нового пользователя.
+        Добавление нового пользователя или обновление существующего.
 
         Args:
             chat_id: ID чата пользователя
             status: Статус пользователя ('Enable' или 'Disable')
+            delivery_mode: Режим доставки ('text', 'html', 'smart')
 
         Returns:
-            True если пользователь добавлен успешно, иначе False
+            True если пользователь добавлен/обновлен успешно, иначе False
         """
-        logger.info(f"Попытка добавления пользователя: {chat_id}, статус: {status}")
+        if status not in ('Enable', 'Disable'):
+            logger.warning(f"Неверный статус '{status}' при добавлении пользователя {chat_id}. Используется 'Enable'.")
+            status = 'Enable'
+        if delivery_mode not in ALLOWED_DELIVERY_MODES:
+            logger.warning(
+                f"Неверный режим доставки '{delivery_mode}' при добавлении пользователя {chat_id}. Используется '{DEFAULT_DELIVERY_MODE}'.")
+            delivery_mode = DEFAULT_DELIVERY_MODE
+
+        logger.info(f"Попытка добавления/обновления пользователя: {chat_id}, статус: {status}, режим: {delivery_mode}")
 
         try:
             with self.get_connection() as conn:
@@ -698,25 +825,35 @@ class DatabaseManager:
 
                 now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+                # Используем INSERT OR REPLACE для добавления или обновления
                 query = '''
-                INSERT OR REPLACE INTO users (chat_id, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?)
+                INSERT OR REPLACE INTO users (chat_id, status, delivery_mode, created_at, updated_at)
+                VALUES (?, ?, ?, COALESCE((SELECT created_at FROM users WHERE chat_id = ?), ?), ?)
                 '''
 
-                cursor.execute(query, (chat_id, status, now, now))
+                cursor.execute(query, (chat_id, status, delivery_mode, chat_id, now, now))
                 conn.commit()  # Явный коммит
 
                 rows_affected = cursor.rowcount
-                logger.info(f"Добавлен пользователь {chat_id}: затронуто строк: {rows_affected}")
+                logger.info(f"Добавлен/обновлен пользователь {chat_id}: затронуто строк: {rows_affected}")
 
                 # Очищаем соответствующие кэши
                 self._clear_cache(f"user_registered_{chat_id}")
                 self._clear_cache(f"user_status_{chat_id}")
+                self._clear_cache(f"user_delivery_mode_{chat_id}")
                 self._clear_cache("all_users")
+                # Очищаем и другие кэши, которые могли зависеть от данных пользователя
+                self._clear_cache("all_subjects")
+                self._clear_cache("all_client_data")
+                self._clear_cache("active_users_with_subjects")
 
                 return rows_affected > 0
         except Exception as e:
-            logger.error(f"Ошибка при добавлении пользователя {chat_id}: {e}", exc_info=True)
+            logger.error(f"Ошибка при добавлении/обновлении пользователя {chat_id}: {e}", exc_info=True)
+            try:
+                conn.rollback()
+            except Exception as rb_err:
+                logger.error(f"Ошибка при откате транзакции: {rb_err}")
             return False
 
     def add_subject(self, chat_id: str, subject: str) -> bool:
@@ -908,10 +1045,12 @@ class DatabaseManager:
                         # Очищаем соответствующие кэши
                         self._clear_cache(f"user_registered_{chat_id}")
                         self._clear_cache(f"user_status_{chat_id}")
+                        self._clear_cache(f"user_delivery_mode_{chat_id}")
                         self._clear_cache(f"user_subjects_{chat_id}")
                         self._clear_cache("all_subjects")
                         self._clear_cache("all_users")
                         self._clear_cache("all_client_data")
+                        self._clear_cache("active_users_with_subjects")
 
                         logger.info(f"Пользователь {chat_id} успешно удален вместе с {subjects_deleted} темами")
                         return True

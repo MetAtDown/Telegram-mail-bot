@@ -1,83 +1,156 @@
-{% extends 'base.html' %}
+<!DOCTYPE html>
+<!-- templates/add_user.html -->
+{% extends 'base.html' %} {# Наследуем базовый шаблон #}
 
-{% block title %}Добавить пользователя | DEERAY TG BOT{% endblock %}
+{% block title %}Добавить пользователя/группу | DEERAY TG BOT{% endblock %}
 
 {% block content %}
 <div class="page-header">
-    <h1>Добавить нового пользователя</h1>
+    <h1>Добавить нового пользователя или группу</h1>
     <a href="{{ url_for('users') }}" class="btn btn-neutral back-btn">
-        <span>◀</span> Назад к списку
+        <span aria-hidden="true">◀</span> Назад к списку
     </a>
 </div>
 
 <div class="panel">
-    <div class="panel-header">Новый пользователь</div>
-    <div class="panel-body">
+    <div class="panel-header">
         {% if user_exists %}
-        <div class="alert alert-warning">
-            Пользователь с Chat ID {{ chat_id }} уже существует! Вы хотите перезаписать его?
-        </div>
-        <form method="post" action="{{ url_for('add_user') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="chat_id" value="{{ chat_id }}">
-            <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
-            <input type="hidden" name="subjects" value="{{ subjects }}">
-            <input type="hidden" name="confirm_overwrite" value="true">
-            <div class="buttons-container">
-                <button type="submit" class="btn btn-warning">Да, перезаписать</button>
-                <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
-            </div>
-        </form>
+            Подтверждение обновления
         {% elif duplicate_subjects %}
-        <div class="alert alert-warning">
-            Некоторые темы уже существуют у других пользователей. Вы хотите продолжить?
-        </div>
-        <form method="post" action="{{ url_for('add_user') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="chat_id" value="{{ chat_id }}">
-            <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
-            <input type="hidden" name="subjects" value="{{ subjects }}">
-            <input type="hidden" name="confirm_duplicate_subjects" value="true">
-            <div class="buttons-container">
-                <button type="submit" class="btn btn-warning">Да, продолжить</button>
-                <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
-            </div>
-        </form>
+            Подтверждение дубликатов тем
         {% else %}
-        <form method="post" action="{{ url_for('add_user') }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            
-            <div class="form-group">
-                <label class="form-label">Chat ID пользователя</label>
-                <input type="text" name="chat_id" class="form-control" placeholder="Введите Chat ID" required pattern="[0-9]+" value="{{ chat_id|default('') }}">
-                <div class="hint-text">Только цифры, без пробелов и других символов</div>
-            </div>
-            
-            <div class="form-group">
-    <label class="form-label">Статус уведомлений</label>
-    <div class="radio-group">
-        <label class="radio-label radio-active">
-            <input type="radio" name="status" value="enable" checked style="display: none;">
-            <span class="radio-custom"></span>
-            Включены
-        </label>
-        <label class="radio-label">
-            <input type="radio" name="status" value="disable" style="display: none;">
-            <span class="radio-custom"></span>
-            Отключены
-        </label>
-    </div>
-</div>
-            
-            <div class="form-group">
-                <label class="form-label">Темы (каждая с новой строки)</label>
-                <textarea name="subjects" class="form-control" rows="6">{{ subjects|default('') }}</textarea>
-                <div class="hint-text">Можно оставить пустым и добавить темы позже</div>
-            </div>
-            
-            <button type="submit" class="btn btn-primary">Добавить пользователя</button>
-        </form>
+            Новый пользователь/группа
         {% endif %}
     </div>
-</div>
+    <div class="panel-body">
+
+        {# --- Блок 1: Подтверждение перезаписи существующего пользователя/группы --- #}
+        {% if user_exists %}
+            <div class="alert alert-warning">
+                <strong>Внимание:</strong> Пользователь или группа с Chat ID <strong>{{ chat_id }}</strong> уже существует в системе.
+                <br>
+                Если вы продолжите, его статус (включены/отключены уведомления) будет обновлен, и указанные ниже темы будут добавлены к его существующим подпискам. Существующие темы не будут удалены.
+            </div>
+            {# Форма для подтверждения перезаписи #}
+            <form method="post" action="{{ url_for('add_user') }}" id="confirm-overwrite-form">
+                {# Обязательный CSRF токен для безопасности #}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                {# Передаем данные из предыдущей попытки #}
+                <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
+                {# Используем |default('') чтобы избежать ошибки, если subjects не переданы #}
+                <input type="hidden" name="subjects" value="{{ subjects|default('') }}">
+
+                {# Флаг подтверждения перезаписи #}
+                <input type="hidden" name="confirm_overwrite" value="true">
+
+                <div class="buttons-container mt-3"> {# Добавляем отступ сверху #}
+                    <button type="submit" class="btn btn-warning">
+                        Да, обновить пользователя/группу
+                    </button>
+                    <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
+                </div>
+            </form>
+
+        {# --- Блок 2: Подтверждение добавления тем, уже существующих у других --- #}
+        {% elif duplicate_subjects %}
+            <div class="alert alert-warning">
+                <strong>Внимание:</strong> Одна или несколько из указанных тем уже используются другими пользователями или группами.
+                <br>
+                Это может привести к дублированию уведомлений, если разные пользователи подписаны на одну и ту же тему из разных источников.
+                <br>
+                Вы уверены, что хотите добавить эти темы для Chat ID <strong>{{ chat_id }}</strong>?
+            </div>
+             {# Форма для подтверждения добавления дублирующихся тем #}
+            <form method="post" action="{{ url_for('add_user') }}" id="confirm-duplicate-form">
+                {# CSRF токен #}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                {# Передаем данные из предыдущей попытки #}
+                <input type="hidden" name="chat_id" value="{{ chat_id }}">
+                <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
+                <input type="hidden" name="subjects" value="{{ subjects|default('') }}">
+
+                {# Флаг подтверждения дубликатов #}
+                <input type="hidden" name="confirm_duplicate_subjects" value="true">
+
+                <div class="buttons-container mt-3">
+                    <button type="submit" class="btn btn-warning">
+                        Да, добавить темы несмотря на дубликаты
+                    </button>
+                    <a href="{{ url_for('add_user') }}" class="btn btn-neutral">Отмена</a>
+                </div>
+            </form>
+
+        {# --- Блок 3: Основная форма добавления пользователя/группы --- #}
+        {% else %}
+            <form method="post" action="{{ url_for('add_user') }}" id="add-user-form">
+                {# CSRF токен #}
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                {# Поле ввода Chat ID #}
+                <div class="form-group">
+                    <label for="chat_id_input" class="form-label">Chat ID пользователя или группы</label>
+                    <input type="text" id="chat_id_input" name="chat_id" class="form-control"
+                           placeholder="Например: 123456789 или -100987654321"
+                           required
+                           pattern="^-?\d+$" {# Разрешает цифры и необязательный минус в начале #}
+                           value="{{ chat_id|default('') }}"
+                           aria-describedby="chat_id_hint">
+                    <div id="chat_id_hint" class="hint-text">
+                        Введите уникальный идентификатор чата. Для групп ID начинается с минуса (-). Узнать ID можно командой /start в нужном чате с ботом.
+                    </div>
+                </div>
+
+                {# Выбор статуса уведомлений #}
+                <div class="form-group">
+                    <label class="form-label">Статус уведомлений</label>
+                    <div class="radio-group" role="radiogroup" aria-labelledby="status-label">
+                        {# Радио-кнопка "Включены" (по умолчанию) #}
+                        <label class="radio-label radio-active"> {# Начальный класс для активного #}
+                            <input type="radio" name="status" value="enable" checked style="display: none;" aria-label="Уведомления включены">
+                            <span class="radio-custom" aria-hidden="true"></span> {# Декоративный элемент #}
+                            Включены
+                        </label>
+                        {# Радио-кнопка "Отключены" #}
+                        <label class="radio-label">
+                            <input type="radio" name="status" value="disable" style="display: none;" aria-label="Уведомления отключены">
+                            <span class="radio-custom" aria-hidden="true"></span> {# Декоративный элемент #}
+                            Отключены
+                        </label>
+                    </div>
+                     <div class="hint-text">
+                        Определяет, будет ли пользователь/группа получать уведомления по своим темам.
+                    </div>
+                </div>
+
+                {# Поле ввода тем #}
+                <div class="form-group">
+                    <label for="subjects_textarea" class="form-label">Темы подписок (каждая с новой строки)</label>
+                    <textarea id="subjects_textarea" name="subjects" class="form-control" rows="6"
+                              placeholder="Например:
+Отчет по продажам за вчера
+Новые лиды из CRM
+Ошибки сервера">{{ subjects|default('') }}</textarea> {# Используем |default('') #}
+                    <div class="hint-text">
+                        Укажите темы писем, которые нужно пересылать этому пользователю/группе. Можно оставить пустым и добавить позже.
+                    </div>
+                </div>
+
+                {# Кнопка отправки формы #}
+                <div class="buttons-container mt-3">
+                    <button type="submit" class="btn btn-primary">Добавить пользователя/группу</button>
+                </div>
+            </form>
+        {% endif %} {# Конец условных блоков #}
+    </div> {# Конец panel-body #}
+</div> {# Конец panel #}
+
+{% endblock %}
+
+{% block scripts %}
+{# Если для радио-кнопок или других элементов нужен JS, он должен быть подключен в base.html или здесь #}
+{# <script src="{{ url_for('static', filename='js/add_user_specific.js') }}"></script> #}
+{# Предполагаем, что основной JS для стилизации радио-кнопок уже есть в main.js #}
 {% endblock %}

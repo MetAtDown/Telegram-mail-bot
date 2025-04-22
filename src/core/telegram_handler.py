@@ -4,6 +4,8 @@ import threading
 import time
 import queue
 import functools
+from telebot.callback_data import CallbackData, CallbackDataFilter
+from telebot.custom_filters import AdvancedCustomFilter
 from typing import Dict, Any, List, Optional, Set, Callable
 from datetime import datetime, timedelta
 import logging
@@ -20,7 +22,18 @@ RETRY_DELAY = 2  # секунды
 RECONNECT_DELAY = 5  # секунды
 MAX_MESSAGE_QUEUE = 100
 CACHE_REFRESH_INTERVAL = 300  # секунды (5 минут)
+DELIVERY_MODE_TEXT = 'text'
+DELIVERY_MODE_HTML = 'html'
+DELIVERY_MODE_SMART = 'smart'
+DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
+delivery_mode_factory = CallbackData("mode", prefix="dlvry")
+
+class DeliveryModeFilter(AdvancedCustomFilter):
+    """Фильтр для обработки callback'ов выбора режима доставки."""
+    key = 'delivery_config'
+    def check(self, call: types.CallbackQuery, config: CallbackDataFilter):
+        return config.check(query=call)
 
 def with_retry(max_attempts: int = MAX_RETRIES, delay: int = RETRY_DELAY):
     """Декоратор для повторных попыток выполнения функции."""
@@ -48,6 +61,7 @@ def with_retry(max_attempts: int = MAX_RETRIES, delay: int = RETRY_DELAY):
         return wrapper
 
     return decorator
+
 
 
 class EmailBotHandler:
@@ -105,26 +119,61 @@ class EmailBotHandler:
 
     def _initialize_bot(self) -> telebot.TeleBot:
         """
-        Инициализация бота с оптимальными настройками.
+        Инициализация бота с оптимальными настройками и кастомными фильтрами.
 
         Returns:
             Инициализированный экземпляр TeleBot
         """
         try:
             # Настройка telebot для оптимальной работы
-            # Удалён параметр timeout, который не поддерживается текущей версией библиотеки
             bot = telebot.TeleBot(
                 self.telegram_token,
-                threaded=True,  # Включаем многопоточность
-                num_threads=4,  # Оптимальное количество потоков
-                parse_mode="Markdown"  # Устанавливаем режим разметки по умолчанию
+                threaded=True,
+                num_threads=4,
+                parse_mode="Markdown"
             )
+
+            bot.add_custom_filter(DeliveryModeFilter())
+            logger.info("Кастомный фильтр DeliveryModeFilter зарегистрирован.")
+
 
             logger.info("Telegram бот успешно инициализирован")
             return bot
         except Exception as e:
             logger.error(f"Ошибка при инициализации Telegram бота: {e}")
             raise
+
+    def get_delivery_mode_keyboard(self, current_mode: str) -> types.InlineKeyboardMarkup:
+        """
+        Создает Inline-клавиатуру для выбора режима доставки, отмечая текущий.
+
+        Args:
+            current_mode: Текущий режим доставки пользователя ('text', 'html', 'smart')
+
+        Returns:
+            Объект Inline-клавиатуры для Telegram
+        """
+        keyboard = types.InlineKeyboardMarkup(row_width=1)
+
+        # Отмечаем текущий режим галочкой (✅) или другим символом
+        def get_button_text(mode_code: str, text: str) -> str:
+            return f"✅ {text}" if mode_code == current_mode else text
+
+        keyboard.add(
+            types.InlineKeyboardButton(
+                get_button_text(DELIVERY_MODE_SMART, "Авто (Текст / HTML)"),
+                callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_SMART)
+            ),
+            types.InlineKeyboardButton(
+                get_button_text(DELIVERY_MODE_TEXT, "Только текст (разделять)"),
+                callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_TEXT)
+            ),
+            types.InlineKeyboardButton(
+                get_button_text(DELIVERY_MODE_HTML, "Только HTML файл"),
+                callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_HTML)
+            )
+        )
+        return keyboard
 
     def reload_client_data(self) -> None:
         """Загрузка данных о клиентах из базы данных с кэшированием."""
@@ -186,21 +235,25 @@ class EmailBotHandler:
 
     def get_main_menu_keyboard(self) -> types.ReplyKeyboardMarkup:
         """
-        Создание клавиатуры главного меню (кэшируем для оптимизации).
+        Создание клавиатуры главного меню с кнопкой настройки режима доставки.
 
         Returns:
             Объект клавиатуры для Telegram
         """
         try:
-            # Создаем клавиатуру как атрибут класса при первом вызове
+            # Используем кэширование в атрибуте класса
             if not hasattr(self, '_main_menu_keyboard'):
                 markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
                 btn_status = types.KeyboardButton('📊 Статус')
                 btn_reports = types.KeyboardButton('📋 Мои отчеты')
-                btn_enable = types.KeyboardButton('✅ Включить уведомления')
-                btn_disable = types.KeyboardButton('❌ Отключить уведомления')
+                btn_enable = types.KeyboardButton('✅ Вкл. уведомления')
+                btn_disable = types.KeyboardButton('❌ Выкл. уведомления')
+                btn_delivery = types.KeyboardButton('⚙️ Режим доставки')
                 btn_help = types.KeyboardButton('❓ Помощь')
-                markup.add(btn_status, btn_reports, btn_enable, btn_disable, btn_help)
+                # Добавляем кнопки, располагая их логично
+                markup.add(btn_status, btn_reports)
+                markup.add(btn_enable, btn_disable)
+                markup.add(btn_delivery, btn_help)
                 self._main_menu_keyboard = markup
 
             return self._main_menu_keyboard
@@ -228,7 +281,13 @@ class EmailBotHandler:
             # Получаем данные из кэша или базы данных
             subjects = self.db_manager.get_user_subjects(chat_id)
             is_enabled = self.db_manager.get_user_status(chat_id)
-
+            delivery_mode = self.db_manager.get_user_delivery_mode(chat_id)
+            mode_text_map = {
+                DELIVERY_MODE_SMART: "Авто (Текст/HTML)",
+                DELIVERY_MODE_TEXT: "Только текст",
+                DELIVERY_MODE_HTML: "Только HTML файл"
+            }
+            delivery_mode_text = mode_text_map.get(delivery_mode, delivery_mode.capitalize())
             # Обновляем локальный кэш
             with self.lock:
                 self.user_states[chat_id] = is_enabled
@@ -425,11 +484,114 @@ class EmailBotHandler:
                 logger.error(f"Ошибка при обработке команды /help: {e}")
                 self._handle_command_error(message, e)
 
+        @self.bot.message_handler(commands=['deliverymode'])
+        def handle_delivery_mode_command(message: types.Message) -> None:
+            """Обработчик команды /deliverymode."""
+            self._update_user_activity(message.chat.id)
+            try:
+                chat_id = str(message.chat.id)
+                # Получаем текущий режим из DatabaseManager
+                current_mode = self.db_manager.get_user_delivery_mode(chat_id)
+
+                mode_description = {
+                    DELIVERY_MODE_SMART: "Текст, если сообщение короткое, иначе HTML-файл.",
+                    DELIVERY_MODE_TEXT: "Всегда текст, длинные сообщения будут разделены.",
+                    DELIVERY_MODE_HTML: "Всегда HTML-файл (если у письма есть HTML-версия)."
+                }.get(current_mode, "Неизвестный режим.")
+
+                self._queue_message(
+                    chat_id,
+                    f"⚙️ *Настройка режима доставки длинных писем*\n\n"
+                    f"Выберите, как вы предпочитаете получать сообщения, которые не помещаются в одно сообщение Telegram (> 4096 символов).\n\n"
+                    f"*Текущий режим:* `{current_mode.capitalize()}`\n"
+                    f"_{mode_description}_\n\n"
+                    f"Выберите новый режим:",
+                    reply_markup=self.get_delivery_mode_keyboard(current_mode),
+                    parse_mode='Markdown'  # Указываем Markdown явно
+                )
+                logger.info(f"Пользователь {chat_id} запросил изменение режима доставки (текущий: {current_mode})")
+            except Exception as e:
+                logger.error(f"Ошибка при обработке команды /deliverymode для {message.chat.id}: {e}")
+                self._handle_command_error(message, e)
+
+        @self.bot.callback_query_handler(func=None, delivery_config=delivery_mode_factory.filter())
+        def handle_delivery_mode_callback(call: types.CallbackQuery):
+            """Обработчик нажатий на кнопки выбора режима доставки."""
+            try:
+                # Парсим данные из callback'а
+                callback_data: dict = delivery_mode_factory.parse(callback_data=call.data)
+                new_mode = callback_data.get('mode')
+                chat_id = str(call.message.chat.id)
+
+                if not new_mode:
+                    logger.warning(f"Не удалось извлечь 'mode' из callback_data: {call.data}")
+                    self.bot.answer_callback_query(call.id, "Ошибка обработки данных.", show_alert=True)
+                    return
+
+                # Получаем текущий режим, чтобы не обновлять, если он не изменился
+                current_mode = self.db_manager.get_user_delivery_mode(chat_id)
+
+                if new_mode == current_mode:
+                    self.bot.answer_callback_query(call.id, "Этот режим уже установлен.")
+                    # Можно отредактировать сообщение, убрав кнопки, если нужно
+                    try:
+                        self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id,
+                                                           reply_markup=None)
+                    except Exception as edit_err:
+                        logger.debug(f"Не удалось убрать клавиатуру после повторного выбора режима: {edit_err}")
+                    return
+
+                # Обновляем режим в базе данных
+                if self.db_manager.update_user_delivery_mode(chat_id, new_mode):
+                    mode_text_map = {
+                        DELIVERY_MODE_SMART: "Авто (Текст/HTML)",
+                        DELIVERY_MODE_TEXT: "Только текст",
+                        DELIVERY_MODE_HTML: "Только HTML файл"
+                    }
+                    mode_text = mode_text_map.get(new_mode, new_mode.capitalize())
+
+                    self.bot.answer_callback_query(call.id, f"Режим изменен на: {mode_text}")
+                    # Редактируем исходное сообщение, чтобы убрать кнопки и показать новый выбор
+                    try:
+                        self.bot.edit_message_text(
+                            f"✅ Режим доставки длинных писем изменен на: *{mode_text}*",
+                            call.message.chat.id,
+                            call.message.message_id,
+                            reply_markup=None,  # Убираем клавиатуру
+                            parse_mode='Markdown'
+                        )
+                    except Exception as edit_err:
+                        logger.warning(f"Не удалось отредактировать сообщение после смены режима: {edit_err}")
+
+                    logger.info(f"Пользователь {chat_id} изменил режим доставки на {new_mode}")
+                else:
+                    self.bot.answer_callback_query(call.id, "⚠️ Ошибка при изменении режима. Попробуйте позже.",
+                                                   show_alert=True)
+                    logger.warning(f"Не удалось изменить режим доставки для {chat_id} на {new_mode}")
+
+            except Exception as e:
+                logger.error(f"Ошибка при обработке callback'а выбора режима доставки ({call.data}): {e}",
+                             exc_info=True)
+                try:
+                    # Пытаемся уведомить пользователя об ошибке
+                    self.bot.answer_callback_query(call.id, "Произошла внутренняя ошибка.", show_alert=True)
+                except Exception:
+                    pass  # Если даже answer_callback_query не сработал
+            # finally: # Убираем finally, так как answer_callback_query должен быть вызван всегда
+            #      # Убираем часики ожидания с кнопки в любом случае (если не было answer_callback_query)
+            #      try:
+            #          if not call.answered: # Проверяем, был ли уже дан ответ
+            #              self.bot.answer_callback_query(call.id)
+            #      except Exception:
+            #          pass
+
         @self.bot.message_handler(func=lambda message: message.text in ['📊 Статус', '📋 Мои отчеты',
-                                                                        '✅ Включить уведомления',
-                                                                        '❌ Отключить уведомления',
+                                                                        '✅ Вкл. уведомления',
+                                                                        '❌ Выкл. уведомления',
+                                                                        '⚙️ Режим доставки',
                                                                         '❓ Помощь'])
         def handle_menu_buttons(message: types.Message) -> None:
+            """Обработчик нажатий на кнопки ReplyKeyboard."""
             self._update_user_activity(message.chat.id)
             try:
                 chat_id = str(message.chat.id)
@@ -437,22 +599,27 @@ class EmailBotHandler:
 
                 if message.text == '📊 Статус':
                     status_message = self.get_status_message(chat_id, user_name)
-                    self._queue_message(chat_id, status_message)
+                    self._queue_message(chat_id, status_message, parse_mode='Markdown')  # Указываем parse_mode
                     logger.info(f"Пользователь {chat_id} запросил статус через меню")
 
                 elif message.text == '📋 Мои отчеты':
-                    handle_show_reports(message)
+                    handle_show_reports(message)  # Используем существующий обработчик команды
 
-                elif message.text == '✅ Включить уведомления':
-                    handle_enable(message)
+                elif message.text == '✅ Вкл. уведомления':
+                    handle_enable(message)  # Используем существующий обработчик команды
 
-                elif message.text == '❌ Отключить уведомления':
-                    handle_disable(message)
+                elif message.text == '❌ Выкл. уведомления':
+                    handle_disable(message)  # Используем существующий обработчик команды
+
+                elif message.text == '⚙️ Режим доставки':
+                    # Вызываем обработчик команды /deliverymode
+                    handle_delivery_mode_command(message)
 
                 elif message.text == '❓ Помощь':
-                    handle_help(message)
+                    handle_help(message)  # Используем существующий обработчик команды
+
             except Exception as e:
-                logger.error(f"Ошибка при обработке кнопки меню: {e}")
+                logger.error(f"Ошибка при обработке кнопки меню '{message.text}': {e}")
                 self._handle_command_error(message, e)
 
         @self.bot.message_handler(func=lambda message: True)
@@ -558,19 +725,21 @@ class EmailBotHandler:
         """Безопасная установка команд для подсказок в интерфейсе."""
         try:
             commands = [
-                types.BotCommand("start", "Начать работу с ботом"),
-                types.BotCommand("status", "Показать ваш статус и список отчетов"),
-                types.BotCommand("reports", "Показать список ваших отчетов"),
-                types.BotCommand("enable", "Включить уведомления"),
-                types.BotCommand("disable", "Отключить уведомления"),
-                types.BotCommand("help", "Показать справку")
+                types.BotCommand("start", "🚀 Начать работу / Показать меню"),
+                types.BotCommand("status", "📊 Мой статус и подписки"),
+                types.BotCommand("reports", "📋 Показать список моих подписок"),
+                types.BotCommand("enable", "✅ Включить получение уведомлений"),
+                types.BotCommand("disable", "❌ Отключить получение уведомлений"),
+                types.BotCommand("deliverymode", "⚙️ Настроить режим доставки длинных писем"),
+                types.BotCommand("help", "❓ Помощь по командам")
             ]
 
+            # Попытка установить команды с retry логикой
             for attempt in range(MAX_RETRIES):
                 try:
                     self.bot.set_my_commands(commands)
                     logger.info("Команды бота успешно настроены")
-                    break
+                    break  # Выход из цикла при успехе
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
                         wait_time = RETRY_DELAY * (2 ** attempt)
@@ -581,9 +750,10 @@ class EmailBotHandler:
                         time.sleep(wait_time)
                     else:
                         logger.error(f"Не удалось настроить команды бота после {MAX_RETRIES} попыток: {e}")
+                        # Не выбрасываем исключение, так как это не критично для работы бота
         except Exception as e:
-            logger.error(f"Не удалось настроить команды бота: {e}")
-            # Ошибка не критичная, бот продолжит работать
+            # Ловим любые другие возможные ошибки здесь
+            logger.error(f"Неожиданная ошибка при настройке команд бота: {e}")
 
     def _polling_worker(self) -> None:
         """Безопасный поток для длительного опроса с автоматическим восстановлением."""

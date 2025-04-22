@@ -1220,9 +1220,9 @@ def add_user():
                 flash("Chat ID не может быть пустым", "warning")
                 return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
-            # Проверка, что chat_id содержит только цифры
-            if not re.match(r'^\d+$', chat_id):
-                flash("Chat ID должен содержать только цифры", "warning")
+            # Проверка, что chat_id является целым числом (положительным или отрицательным)
+            if not re.match(r'^-?\d+$', chat_id):
+                flash("Chat ID должен быть целым числом (может начинаться с - для групп)", "warning")
                 return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
             # Проверка существования пользователя
@@ -1260,7 +1260,7 @@ def add_user():
 
             # Добавление/обновление пользователя
             logger.info(f"Отправка запроса на добавление пользователя {chat_id} в БД")
-            result = db_manager.add_user(chat_id, status)
+            result = db_manager.add_user(chat_id, status) # Режим доставки будет по умолчанию
 
             if result:
                 action = "обновлен" if user_exists else "добавлен"
@@ -1272,7 +1272,7 @@ def add_user():
                     log_activity(db_manager, session['user_id'], f"add_user",
                                  request.remote_addr, f"chat_id={chat_id}, status={status}")
 
-                # Если есть темы, добавляем их в отдельном потоке для больших списков
+                # Если есть темы, добавляем их
                 if subjects:
                     def add_subjects_task():
                         return db_manager.add_multiple_subjects(chat_id, subjects)
@@ -1283,19 +1283,17 @@ def add_user():
                     if count > 0:
                         flash(f"Успешно добавлено {count} тем для пользователя", "success")
                         logger.info(f"Добавлено {count} тем для пользователя {chat_id}")
-
-                        # Логирование действия добавления тем
                         if 'user_id' in session:
                             log_activity(db_manager, session['user_id'], f"add_subjects",
                                          request.remote_addr, f"chat_id={chat_id}, count={count}")
 
-                # Полная инвалидация всех кэшей для обеспечения согласованности данных
+                # Полная инвалидация всех кэшей
                 invalidate_all_caches()
 
                 return redirect(url_for('user_details', chat_id=chat_id))
             else:
                 logger.error(f"Не удалось добавить пользователя {chat_id} в БД")
-                flash(f"Не удалось добавить пользователя {chat_id}. Проверьте логи сервера.", "danger")
+                flash(f"Не удалось добавить пользователя {chat_id}. Проверьте логи.", "danger")
                 return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
         except Exception as e:
@@ -1303,6 +1301,7 @@ def add_user():
             flash(f"Произошла ошибка: {e}", "danger")
             return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
+    # Для GET запроса
     return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
 

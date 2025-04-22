@@ -28,7 +28,10 @@ RETRY_DELAY = 2  # секунды
 CONNECTION_TIMEOUT = 30  # секунды
 MAX_BATCH_SIZE = 20  # максимальное количество писем для обработки за раз
 MAX_WORKERS = 3  # количество рабочих потоков для обработки писем
-
+DELIVERY_MODE_TEXT = 'text'
+DELIVERY_MODE_HTML = 'html'
+DELIVERY_MODE_SMART = 'smart'
+DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
 class EmailTelegramForwarder:
     def __init__(self, db_manager=None):
@@ -509,73 +512,98 @@ class EmailTelegramForwarder:
             return original_subject
 
     def format_email_body(self, body: str, content_type: str) -> str:
-        logger.debug(f"Форматирование тела (метод BS + URL). Content-Type: {content_type}. Длина: {len(body)}")
+        """
+        Форматирует тело письма, удаляя "Explore in Superset" и URL.
+        Удаляет <th>, обрабатывает <br> и <a>. НЕ обрезает текст.
+        """
+        logger.debug(
+            f"Форматирование тела. Content-Type: {content_type}. Исходная длина: {len(body)}")
         clean_text = ""
         try:
             # Если содержимое в HTML
             if content_type == "text/html":
-                # Раскодируем HTML-сущности
+                # ... (существующий код парсинга HTML до получения clean_text) ...
                 try:
                     unescaped_body = html.unescape(body)
                 except Exception as ue:
-                    logger.error(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
+                    logger.warning(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
                     unescaped_body = body
 
-                # Парсим HTML
                 try:
-                    soup = BeautifulSoup(unescaped_body, 'lxml')
-                except ImportError:
                     soup = BeautifulSoup(unescaped_body, 'html.parser')
+                except Exception as parse_err:
+                    logger.error(f"Ошибка парсинга HTML BeautifulSoup: {parse_err}. Попытка вернуть исходный текст.")
+                    return body.strip()
 
-                # Удаляем ненужные теги
-                for tag in soup(['script', 'style', 'meta', 'link', 'th']):
+                # Удаляем ненужные теги, ВКЛЮЧАЯ <th>
+                for tag in soup(['script', 'style', 'meta', 'link', 'head', 'title', 'th']):
                     tag.decompose()
 
-                # Обрабатываем ссылки
+                # Обработка ссылок <a>
                 for link_tag in soup.find_all('a', href=True):
-                    href = link_tag.get('href', '')
+                    href = link_tag.get('href', '').strip()
                     link_text = link_tag.get_text(separator=' ', strip=True)
                     if href:
-                        if not link_text:
-                            link_text = href
-                        replacement_node = NavigableString(f"{link_text}\n{href}")
+                        if not link_text or link_text == href:
+                            replacement_node = NavigableString(f"{href}\n")
+                        else:
+                            replacement_node = NavigableString(f"{link_text}\n{href}\n")
                         link_tag.replace_with(replacement_node)
-                    else:
+                    elif link_text:
                         link_tag.replace_with(NavigableString(link_text))
+                    else:
+                        link_tag.decompose()
 
-                # Замена <br> на перенос строки
+                # Обработка <br> -> \n
                 for br in soup.find_all('br'):
                     br.replace_with(NavigableString('\n'))
 
-                # Замена <p> на текст с двойным переносом в конце
-                for p in soup.find_all('p'):
-                    p_content = p.get_text()
-                    p.replace_with(NavigableString(p_content + '\n\n'))
+                # Получаем текст
+                clean_text = soup.get_text(separator='\n').strip()
 
-                # Получаем текст и очищаем излишние переносы
-                clean_text = soup.get_text()
-                clean_text = re.sub(r'\n{3,}', '\n\n', clean_text).strip()
 
+            # Если содержимое в plain text
             elif content_type == "text/plain":
                 clean_text = body.strip()
-                clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
             else:
-                logger.warning(f"Обработка неизвестного content_type: {content_type}. Оставляем как есть.")
-                clean_text = body
+                logger.warning(f"Обработка неизвестного content_type: {content_type}. Используем исходный текст.")
+                clean_text = body.strip()
 
-            # Обрезаем если слишком длинно
-            max_length = 4050
-            if len(clean_text) > max_length:
-                cut_pos = clean_text.rfind('\n', 0, max_length)
-                if cut_pos == -1 or max_length - cut_pos > 1000:
-                    cut_pos = max_length
-                clean_text = clean_text[:cut_pos] + "\n\n...(сообщение обрезано)"
+            lines = clean_text.splitlines()
+            filtered_lines = []
+            skip_next_line = False
+            explore_removed = False # Флаг для логирования
 
+            for line in lines:
+                if skip_next_line:
+                    skip_next_line = False
+                    continue # Пропускаем строку после "Explore in Superset" (URL)
+
+                # Используем strip() для удаления возможных пробелов по краям
+                if line.strip() == "Explore in Superset":
+                    skip_next_line = True # Устанавливаем флаг пропуска следующей строки
+                    explore_removed = True
+                    continue # Пропускаем саму строку "Explore in Superset"
+
+                filtered_lines.append(line) # Добавляем строки, которые не нужно удалять
+
+            if explore_removed:
+                logger.debug("Удалена строка 'Explore in Superset' и следующая за ней.")
+
+            clean_text = "\n".join(filtered_lines).strip()
+
+            # Заменяем 3 и более переносов на 2 *после* фильтрации
+            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
+            # Убираем пробелы/табы перед переносом строки
+            clean_text = re.sub(r'[ \t]+\n', '\n', clean_text)
+
+
+            logger.debug(f"Тело отформатировано (без Superset). Итоговая длина: {len(clean_text)}")
             return clean_text
         except Exception as e:
             logger.error(f"Критическая ошибка в format_email_body: {e}", exc_info=True)
             truncated_body = body[:1000] + "..." if len(body) > 1000 else body
-            return f"⚠ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
+            return f"⚠️ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
     def check_subject_match(self, email_subject: str) -> List[Tuple[str, str]]:
         """
@@ -642,153 +670,181 @@ class EmailTelegramForwarder:
 
     def send_to_telegram(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
         """
-        Отправка данных письма в Telegram, с возможностью отправки HTML файла для длинных сообщений.
+        Отправка данных письма в Telegram с учетом настроек пользователя по режиму доставки.
         """
         # Проверяем ограничение частоты
         if not self._check_rate_limit(chat_id):
+            # Откладываем отправку, если лимит превышен
+            logger.warning(f"Rate limit reached for chat {chat_id}. Rescheduling.")
+            # Используем threading.Timer для отложенного вызова
             threading.Timer(60.0, self.send_to_telegram, args=[chat_id, email_data]).start()
-            return False
+            return False  # Возвращаем False, так как отправка не произошла сейчас
 
         try:
-            # Форматируем тело письма с сохранением структуры
-            body = email_data["body"]
-            content_type = email_data["content_type"]
-            raw_html_body = email_data.get("raw_html_body")
+            # ---> НАЧАЛО ИЗМЕНЕНИЙ: ПОЛУЧЕНИЕ РЕЖИМА ДОСТАВКИ <---
+            user_delivery_mode = DEFAULT_DELIVERY_MODE  # Значение по умолчанию
+            try:
+                # Пытаемся получить режим из DatabaseManager
+                # Убедитесь, что self.db_manager инициализирован и имеет метод get_user_delivery_mode
+                if hasattr(self, 'db_manager') and self.db_manager:
+                    retrieved_mode = self.db_manager.get_user_delivery_mode(chat_id)
+                    if retrieved_mode:  # Проверяем, что метод вернул непустое значение
+                        user_delivery_mode = retrieved_mode
+                    else:
+                        logger.warning(
+                            f"Метод get_user_delivery_mode для {chat_id} вернул пустое значение, используем default: {DEFAULT_DELIVERY_MODE}")
+                else:
+                    logger.error(
+                        "Экземпляр db_manager отсутствует в EmailTelegramForwarder. Невозможно получить режим доставки.")
 
-            # Форматируем согласно старой версии для сохранения структуры
+            except AttributeError:
+                logger.error("Метод get_user_delivery_mode отсутствует в db_manager. Используем default.")
+            except Exception as db_err:
+                logger.error(
+                    f"Ошибка получения режима доставки для {chat_id}: {db_err}. Используем default: {DEFAULT_DELIVERY_MODE}")
+            # ---> КОНЕЦ ИЗМЕНЕНИЙ: ПОЛУЧЕНИЕ РЕЖИМА ДОСТАВКИ <---
+
+            # Форматируем тело письма
+            body = email_data.get("body", "")  # Используем .get для безопасности
+            content_type = email_data.get("content_type", "text/plain")
+            raw_html_body = email_data.get("raw_html_body")  # Может быть None
+
+            # Используем вашу функцию форматирования
             formatted_body = self.format_email_body(body, content_type)
 
             # Создаем заголовок
-            header = (
-                f"📧 Новое письмо\n\n"
-                f"От: {email_data['from']}\n"
-                f"Тема: {email_data['subject']}\n"
-                f"Дата: {email_data['date']}\n\n"
-            )
-
-            # Объединяем заголовок и тело в одно сообщение
-            combined_message = header + formatted_body
-
-            # Проверяем наличие вложений
-            has_attachments = "attachments" in email_data and email_data["attachments"] and len(
-                email_data["attachments"]) > 0
-
-            # Длина сообщения для определения способа отправки
-            TELEGRAM_MAX_LEN = 4096
+            combined_message = formatted_body
+            has_attachments = bool(email_data.get("attachments"))
+            TELEGRAM_MAX_LEN = 4096  # Максимальная длина сообщения Telegram
             message_length = len(combined_message)
 
-            # Если сообщение длинное и есть HTML, отправляем как HTML файл
-            if raw_html_body and message_length >= TELEGRAM_MAX_LEN:
-                logger.info(f"Сообщение слишком длинное ({message_length} символов). Отправка как HTML файл.")
+            # ---> НАЧАЛО ИЗМЕНЕНИЙ: ЛОГИКА ВЫБОРА СПОСОБА ОТПРАВКИ <---
+            send_as_html = False
+            # HTML можно отправить только если есть raw_html_body
+            if raw_html_body:
+                if user_delivery_mode == DELIVERY_MODE_HTML:
+                    send_as_html = True
+                    logger.debug(f"Режим для {chat_id}: HTML. Отправляем как HTML.")
+                elif user_delivery_mode == DELIVERY_MODE_SMART and message_length >= TELEGRAM_MAX_LEN:
+                    send_as_html = True
+                    logger.debug(
+                        f"Режим для {chat_id}: Smart, сообщение длинное ({message_length}). Отправляем как HTML.")
+                # Если режим 'text' или 'smart' и сообщение короткое, send_as_html остается False
+                elif user_delivery_mode == DELIVERY_MODE_TEXT:
+                    logger.debug(f"Режим для {chat_id}: Text. Отправляем как текст.")
+                else:  # Smart и короткое
+                    logger.debug(
+                        f"Режим для {chat_id}: Smart, сообщение короткое ({message_length}). Отправляем как текст.")
+            else:
+                # Если нет raw_html_body, всегда отправляем как текст, независимо от настроек
+                send_as_html = False
+                logger.debug(
+                    f"Нет raw_html_body для письма '{email_data.get('subject', '')}'. Отправляем как текст для {chat_id}.")
+            # ---> КОНЕЦ ИЗМЕНЕНИЙ: ЛОГИКА ВЫБОРА СПОСОБА ОТПРАВКИ <---
 
-                # Создаем HTML файл
+            # --- Отправка как HTML файл ---
+            if send_as_html:
+                logger.info(
+                    f"Отправка письма '{email_data.get('subject', '')}' как HTML файл для {chat_id} (режим: {user_delivery_mode}, длина: {message_length})")
                 temp_dir = None
                 temp_file_path = None
-
                 try:
+                    # Создаем временный файл (ваш существующий код)
                     temp_dir = tempfile.mkdtemp()
-                    base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data['subject'])[:50]
+                    # Очищаем имя файла темы для использования в имени файла
+                    base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data.get('subject', 'email'))[:50]
+                    # Добавляем уникальный идентификатор, чтобы избежать коллизий
                     html_filename = f"{base_filename}_{uuid.uuid4().hex[:6]}.html"
                     temp_file_path = os.path.join(temp_dir, html_filename)
 
-                    # Обработка raw_html_body
-                    logger.debug(f"Raw HTML перед обработкой: {raw_html_body[:500]}...")
-
-                    # Шаг 1: Раскодируем HTML-сущности
-                    processed_html = html.unescape(raw_html_body)
-
-                    # Шаг 2: Исправляем малформованные теги (например, <?p>)
-                    processed_html = re.sub(r'<\?p>', '<p>', processed_html)
-                    processed_html = re.sub(r'<\?>', '', processed_html)
-
-                    # Шаг 3: Парсим и очищаем HTML
+                    # Обработка и запись HTML в файл (ваш существующий код)
+                    # Убедитесь, что raw_html_body обрабатывается перед записью
+                    processed_html = html.unescape(raw_html_body)  # Раскодируем сущности
+                    processed_html = re.sub(r'<\?p>', '<p>', processed_html)  # Исправляем <?p> если есть
+                    processed_html = re.sub(r'<\?>', '', processed_html)  # Исправляем <?> если есть
                     try:
+                        # Используем html.parser для большей совместимости
                         soup = BeautifulSoup(processed_html, 'html.parser')
-                        # Удаляем <pre>, чтобы избежать отображения как текста
-                        for pre in soup.find_all('pre'):
-                            pre.unwrap()
+                        # Удаляем ненужные теги, если нужно (опционально)
+                        # for tag in soup(['script', 'style']): tag.decompose()
                         clean_html = str(soup)
-                    except Exception as e:
-                        logger.error(f"Ошибка парсинга HTML: {e}")
-                        clean_html = processed_html  # Фallback на раскодированный HTML
+                    except Exception as parse_err:
+                        logger.warning(f"Ошибка парсинга HTML для файла: {parse_err}. Используем необработанный HTML.")
+                        clean_html = processed_html
 
-                    logger.debug(f"Cleaned HTML после обработки: {clean_html[:500]}...")
-
-                    # Шаг 4: Записываем в файл
                     with open(temp_file_path, 'w', encoding='utf-8') as f:
-                        f.write('<!DOCTYPE html>\n')
-                        f.write('<html lang="ru">\n<head>\n')
+                        # Запись шапки и стилей (ваш существующий код)
+                        f.write('<!DOCTYPE html>\n<html lang="ru">\n<head>\n')
                         f.write('    <meta charset="UTF-8">\n')
                         f.write('    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n')
-                        f.write(f'    <title>{html.escape(email_data["subject"])}</title>\n')
-                        f.write('    <style>\n')
-                        f.write('        body {\n')
-                        f.write('            font-family: Arial, sans-serif;\n')
-                        f.write('            font-size: 16px;\n')  # Базовый размер шрифта
-                        f.write('            line-height: 1.5;\n')
-                        f.write('            padding: 15px;\n')
-                        f.write('            margin: 0;\n')
-                        f.write('        }\n')
-                        f.write('        table {\n')
-                        f.write('            width: 100%;\n')
-                        f.write('            border-collapse: collapse;\n')
-                        f.write('            margin-bottom: 15px;\n')
-                        f.write('        }\n')
-                        f.write('        th, td {\n')
-                        f.write('            border: 1px solid #ddd;\n')
-                        f.write('            padding: 10px;\n')
-                        f.write('            text-align: left;\n')
-                        f.write('        }\n')
-                        f.write('        th {\n')
-                        f.write('            background-color: #f5f5f5;\n')
-                        f.write('        }\n')
-                        f.write('        @media (max-width: 600px) {\n')  # Медиа-запрос для телефонов
-                        f.write('            body {\n')
-                        f.write('                font-size: 14px;\n')  # Уменьшаем шрифт
-                        f.write('                padding: 10px;\n')
-                        f.write('            }\n')
-                        f.write('            table {\n')
-                        f.write('                display: block;\n')
-                        f.write('                overflow-x: auto;\n')  # Горизонтальная прокрутка для таблиц
-                        f.write('                white-space: nowrap;\n')  # Предотвращаем перенос строк
-                        f.write('            }\n')
-                        f.write('            th, td {\n')
-                        f.write('                padding: 6px;\n')  # Уменьшаем отступы
-                        f.write('            }\n')
-                        f.write('        }\n')
-                        f.write('    </style>\n')
+                        f.write(f'    <title>{html.escape(email_data.get("subject", "Письмо"))}</title>\n')
+                        # Добавьте ваши стили сюда
+                        f.write(
+                            '    <style> body { font-family: sans-serif; line-height: 1.5; padding: 15px; } table { border-collapse: collapse; width: 100%; margin-bottom: 1em; } th, td { border: 1px solid #ddd; padding: 8px; text-align: left; } th { background-color: #f2f2f2; } img { max-width: 100%; height: auto; } </style>\n')
                         f.write('</head>\n<body>\n')
-                        f.write(clean_html)
+                        f.write(clean_html)  # Записываем очищенный HTML
                         f.write('\n</body>\n</html>')
 
                     # Отправляем HTML файл
                     with open(temp_file_path, 'rb') as html_file:
-                        caption = (
-                            f"📧 Новое письмо\n\n"
-                            f"От: {email_data['from']}\n"
-                            f"Тема: {email_data['subject']}\n"
-                            f"Дата: {email_data['date']}\n\n"
-                            f"Прислали веб-версию письма, так как оно слишком длинное для одного сообщения."
+                        # Формируем caption для HTML файла
+                        caption_header = (
+                            f"📧 Новое письмо (HTML версия)\n\n"
+                            f"От: {email_data.get('from', 'Неизвестно')}\n"
+                            f"Тема: {email_data.get('subject', 'Без темы')}\n"
+                            f"Дата: {email_data.get('date', 'Неизвестно')}\n\n"
                         )
-                        if len(caption) > 1024:
-                            caption = caption[:1020] + "..."
-                        self.bot.send_document(chat_id, html_file, caption=caption)
+                        # Добавляем информацию о причине отправки файла
+                        if user_delivery_mode == DELIVERY_MODE_HTML:
+                            caption_reason = "Выбран режим 'Только HTML файл'."
+                        else:  # Smart mode
+                            caption_reason = "Сообщение слишком длинное для Telegram."
 
-                    logger.info(f"HTML файл успешно отправлен для чата {chat_id}")
+                        full_caption = caption_header + caption_reason
+                        # Обрезаем caption, если он превышает лимит Telegram (1024)
+                        if len(full_caption) > 1024:
+                            full_caption = full_caption[:1020] + "... " + caption_reason  # Сохраняем причину
 
-                    # Отправляем вложения, если есть
+                        # Отправляем документ с retry логикой (можно обернуть в декоратор @with_retry)
+                        # self.bot.send_document(chat_id, html_file, caption=full_caption) # Замените на ваш метод с retry, если есть
+                        # Пример с простой логикой retry здесь:
+                        for attempt in range(MAX_RETRIES):
+                            try:
+                                self.bot.send_document(chat_id, html_file, caption=full_caption)
+                                logger.info(f"HTML файл '{html_filename}' успешно отправлен для {chat_id}")
+                                break  # Успешно отправлено
+                            except Exception as send_err:
+                                if attempt < MAX_RETRIES - 1:
+                                    wait_time = RETRY_DELAY * (2 ** attempt)
+                                    logger.warning(
+                                        f"Ошибка отправки HTML файла для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
+                                    time.sleep(wait_time)
+                                else:
+                                    logger.error(
+                                        f"Не удалось отправить HTML файл для {chat_id} после {MAX_RETRIES} попыток: {send_err}")
+                                    raise send_err  # Передаем ошибку дальше
+
+                    # Отправляем вложения отдельно, если они есть
                     if has_attachments:
+                        logger.info(
+                            f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после HTML файла.")
                         for attachment in email_data["attachments"]:
                             self.send_attachment_to_telegram(chat_id, attachment)
-                            time.sleep(0.5)
+                            time.sleep(0.5)  # Небольшая пауза между файлами
 
-                    return True
+                    return True  # Успешная отправка HTML + вложения
 
                 except Exception as e:
-                    logger.error(f"Ошибка при создании/отправке HTML файла: {e}", exc_info=True)
-                    return False
+                    logger.error(f"Ошибка при создании/отправке HTML файла для {chat_id}: {e}", exc_info=True)
+                    # Пытаемся отправить уведомление об ошибке
+                    try:
+                        error_text = f"⚠️ Не удалось отправить письмо '{email_data.get('subject', '')}' как HTML файл из-за внутренней ошибки."
+                        self.bot.send_message(chat_id, error_text)
+                    except Exception as notify_err:
+                        logger.error(f"Не удалось даже отправить уведомление об ошибке для {chat_id}: {notify_err}")
+                    return False  # Ошибка отправки HTML
                 finally:
-                    # Очистка временных файлов (без изменений)
+                    # Очистка временных файлов (ваш существующий код)
                     if temp_file_path and os.path.exists(temp_file_path):
                         try:
                             os.remove(temp_file_path)
@@ -800,51 +856,97 @@ class EmailTelegramForwarder:
                         except Exception as e:
                             logger.warning(f"Не удалось удалить директорию {temp_dir}: {e}")
 
-            # Иначе отправляем как обычный текст (старая версия)
-            # Разбиваем текст на части по 4096 символов
-            message_parts = self.split_text(combined_message, max_length=4096)
-
-            # Если нет вложений, отправляем весь текст частями
-            if not has_attachments:
-                for part in message_parts:
-                    self.bot.send_message(chat_id, part)
-                    time.sleep(0.5)
+            # --- Отправка как текст ---
             else:
-                # Если есть вложения, проверяем длину сообщения
-                if len(combined_message) > 1024:
-                    # Сначала отправляем текст полностью
-                    for part in message_parts:
-                        self.bot.send_message(chat_id, part)
-                        time.sleep(0.5)
+                logger.info(
+                    f"Отправка письма '{email_data.get('subject', '')}' как текст для {chat_id} (режим: {user_delivery_mode}, длина: {message_length})")
 
-                    # Затем отправляем вложения
-                    for attachment in email_data["attachments"]:
-                        self.send_attachment_to_telegram(chat_id, attachment)
-                        time.sleep(0.5)
-                else:
-                    # Отправляем первое вложение с текстом как caption
-                    first_attachment = email_data["attachments"][0]
-                    self.send_attachment_with_message(chat_id, first_attachment, combined_message)
+                # Разбиваем текст на части (ваш существующий код)
+                message_parts = self.split_text(combined_message, max_length=TELEGRAM_MAX_LEN)
 
-                    # Отправляем оставшиеся вложения
-                    for attachment in email_data["attachments"][1:]:
-                        self.send_attachment_to_telegram(chat_id, attachment)
-                        time.sleep(0.5)
+                try:
+                    # Логика отправки текста и вложений (ваш существующий код)
+                    if not has_attachments:
+                        # Отправляем все части текста
+                        for i, part in enumerate(message_parts):
+                            # Добавляем пометку для частей > 1
+                            prefix = f"[{i + 1}/{len(message_parts)}] " if len(message_parts) > 1 else ""
+                            # self.bot.send_message(chat_id, prefix + part) # Замените на ваш метод с retry
+                            # Пример с простой логикой retry здесь:
+                            for attempt in range(MAX_RETRIES):
+                                try:
+                                    self.bot.send_message(chat_id, prefix + part)
+                                    break  # Успех
+                                except Exception as send_err:
+                                    if attempt < MAX_RETRIES - 1:
+                                        wait_time = RETRY_DELAY * (2 ** attempt)
+                                        logger.warning(
+                                            f"Ошибка отправки текстовой части {i + 1} для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
+                                        time.sleep(wait_time)
+                                    else:
+                                        logger.error(
+                                            f"Не удалось отправить текстовую часть {i + 1} для {chat_id}: {send_err}")
+                                        raise send_err  # Передаем ошибку
+                            time.sleep(0.5)  # Пауза между частями
+                    else:
+                        # Есть вложения
+                        # Если текст помещается в caption (1024 символа) и есть только одно вложение
+                        if message_length <= 1024 and len(email_data["attachments"]) == 1:
+                            first_attachment = email_data["attachments"][0]
+                            self.send_attachment_with_message(chat_id, first_attachment, combined_message)
+                        else:
+                            # Отправляем текст частями
+                            for i, part in enumerate(message_parts):
+                                prefix = f"[{i + 1}/{len(message_parts)}] " if len(message_parts) > 1 else ""
+                                # self.bot.send_message(chat_id, prefix + part) # Замените на ваш метод с retry
+                                # Пример с простой логикой retry здесь:
+                                for attempt in range(MAX_RETRIES):
+                                    try:
+                                        self.bot.send_message(chat_id, prefix + part)
+                                        break  # Успех
+                                    except Exception as send_err:
+                                        if attempt < MAX_RETRIES - 1:
+                                            wait_time = RETRY_DELAY * (2 ** attempt)
+                                            logger.warning(
+                                                f"Ошибка отправки текстовой части {i + 1} (с вложениями) для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
+                                            time.sleep(wait_time)
+                                        else:
+                                            logger.error(
+                                                f"Не удалось отправить текстовую часть {i + 1} (с вложениями) для {chat_id}: {send_err}")
+                                            raise send_err  # Передаем ошибку
+                                time.sleep(0.5)  # Пауза
 
-            logger.info(f"Сообщение успешно отправлено в чат {chat_id}")
-            return True
+                            # Затем отправляем вложения
+                            logger.info(
+                                f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после текста.")
+                            for attachment in email_data["attachments"]:
+                                self.send_attachment_to_telegram(chat_id, attachment)
+                                time.sleep(0.5)  # Пауза
+
+                    logger.info(f"Сообщение успешно отправлено текстом в чат {chat_id}")
+                    return True  # Успешная отправка текста + вложения
+
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке текстового сообщения или вложений для {chat_id}: {e}",
+                                 exc_info=True)
+                    # Пытаемся отправить уведомление об ошибке
+                    try:
+                        error_text = f"⚠️ Не удалось отправить письмо '{email_data.get('subject', '')}' (текстовая версия) из-за внутренней ошибки."
+                        self.bot.send_message(chat_id, error_text)
+                    except Exception as notify_err:
+                        logger.error(f"Не удалось даже отправить уведомление об ошибке для {chat_id}: {notify_err}")
+                    return False  # Ошибка отправки текста
 
         except Exception as e:
-            logger.error(f"Ошибка при отправке сообщения в Telegram: {e}", exc_info=True)
-            # Пробуем отправить упрощенное сообщение в случае ошибки
+            # Ловим общие ошибки на верхнем уровне функции
+            logger.error(f"Критическая ошибка в send_to_telegram для {chat_id}: {e}", exc_info=True)
+            # Пытаемся отправить уведомление об ошибке
             try:
-                simple_message = f"📧 Новое письмо\n\nТема: {email_data['subject']}"
-                self.bot.send_message(chat_id, simple_message)
-                logger.info(f"Отправлено упрощенное сообщение в чат {chat_id}")
-                return True
-            except Exception as e2:
-                logger.error(f"Критическая ошибка отправки: {e2}")
-                return False
+                error_text = f"⚠️ Произошла критическая ошибка при обработке письма '{email_data.get('subject', '')}'. Администратор уведомлен."
+                self.bot.send_message(chat_id, error_text)
+            except Exception as notify_err:
+                logger.error(f"Не удалось даже отправить уведомление о критической ошибке для {chat_id}: {notify_err}")
+            return False  # Общая ошибка
 
     def send_attachment_with_message(self, chat_id: str, attachment: Dict[str, Any], message: str) -> None:
         """
@@ -935,18 +1037,68 @@ class EmailTelegramForwarder:
                     logger.warning(f"Не удалось удалить временную директорию {temp_dir}: {e}")
 
     def split_text(self, text: str, max_length: int = 4096) -> List[str]:
-        """Разбивает текст на части по заданной максимальной длине."""
+        """
+        Разбивает текст на части по заданной максимальной длине,
+        гарантированно оставляя запас для префиксов типа "[N/M] ".
+        """
         parts = []
-        while len(text) > max_length:
-            # Ищем последнее место разрыва перед max_length
-            split_at = text.rfind('\n', 0, max_length)
-            if split_at == -1:  # Если нет переноса строки, разбиваем по max_length
-                split_at = max_length
-            parts.append(text[:split_at])
-            text = text[split_at:].lstrip()  # Убираем лишние пробелы в начале
-        if text:  # Добавляем остаток текста
-            parts.append(text)
-        return parts
+        # Запас символов для префикса (например, "[99/99] " ~ 8 символов) + небольшой доп. запас
+        safety_margin = 20
+        # Максимальная длина контента для каждой части (кроме последней)
+        limit = max_length - safety_margin
+
+        if limit <= 0:
+            logger.error(
+                f"Невозможно разбить текст: max_length ({max_length}) слишком мал для safety_margin ({safety_margin}).")
+            # Возвращаем текст как есть, пусть API ругается
+            return [text]
+
+        current_pos = 0
+        text_len = len(text)
+
+        while current_pos < text_len:
+            # Определяем конец текущего среза (не больше длины текста)
+            end_pos = min(current_pos + limit, text_len)
+
+            # Если оставшийся текст помещается в одну часть (с учетом полной max_length)
+            if text_len - current_pos <= max_length:
+                parts.append(text[current_pos:])
+                break  # Завершаем цикл
+
+            # Ищем последний перенос строки в пределах среза [current_pos, end_pos)
+            split_at = text.rfind('\n', current_pos, end_pos)
+
+            # Если перенос не найден или он слишком близко к началу,
+            # ищем первый пробел с конца для более естественного разрыва
+            if split_at == -1 or split_at == current_pos:
+                # Ищем последний пробел перед end_pos
+                split_at = text.rfind(' ', current_pos, end_pos)
+                # Если пробела нет, придется резать "по живому" на end_pos
+                if split_at == -1 or split_at == current_pos:
+                    split_at = end_pos
+
+            # Если перенос строки найден, он является предпочтительной точкой разреза
+            # Если split_at указывает на \n, то срез [current_pos:split_at] не включает \n
+
+            # Добавляем часть до точки разреза
+            parts.append(text[current_pos:split_at])
+            # Обновляем текущую позицию для следующей части
+            # Перемещаемся за точку разреза и пропускаем пробельные символы (\n, ' ')
+            current_pos = split_at + 1
+            # Пропускаем пробелы/переносы в начале следующей части (если есть)
+            while current_pos < text_len and text[current_pos].isspace():
+                current_pos += 1
+
+        # Фильтруем пустые строки, которые могли образоваться
+        result_parts = [part for part in parts if part and not part.isspace()]
+
+        # Если после всех манипуляций ничего не осталось (очень странно),
+        # возвращаем исходный текст, обрезанный до лимита
+        if not result_parts and text:
+            logger.warning("split_text не смог разбить текст, возвращаем обрезанный исходник.")
+            return [text[:limit]]
+
+        return result_parts
 
     def send_attachment_to_telegram(self, chat_id: str, attachment: Dict[str, Any]) -> None:
         """
