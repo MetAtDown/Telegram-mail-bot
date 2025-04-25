@@ -1,6 +1,6 @@
 /**
  * Улучшенная игра "Охотник за Акулой"
- * Поддержка меняющихся фонов и бонусов
+ * С единым CSS-анимированным фоном
  */
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM элементы ---
@@ -19,6 +19,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadingBar = document.getElementById('loading-bar');
     const loadingText = document.getElementById('loading-text');
     const powerUpIndicator = document.getElementById('powerup-indicator');
+    const darknessOverlay = document.getElementById('darkness-overlay');
 
     // --- Проверка наличия всех элементов ---
     if (!canvas || !ctx || !gameArea || !scoreDisplay || !comboDisplay) {
@@ -40,15 +41,18 @@ document.addEventListener('DOMContentLoaded', () => {
     const SHARK_TILT_SPEED = 0.12;  // Скорость наклона акулы
     const MAGNET_RADIUS = 150;  // Радиус действия магнита
     const IMMUNITY_DURATION = 1500;  // Длительность иммунитета в мс
+    const MAX_LIVES = 10;  // Максимальное количество жизней
 
     // Настройки предметов
-    const INITIAL_ITEM_SPEED = 3.0;
+    const INITIAL_ITEM_SPEED = 2.0;
     const INITIAL_SPAWN_INTERVAL = 800;
     const ITEM_SIZE = 40;  // Базовый размер предметов
     const INITIAL_OBSTACLE_PROBABILITY = 0.3;  // Вероятность препятствий
     const SPECIAL_PROBABILITY = 0.05;  // Вероятность особых предметов
     const POWERUP_PROBABILITY = 0.03;  // Вероятность бонусов
+    const EXTRA_LIFE_PROBABILITY = 0.01;  // Вероятность бонуса жизни (самая редкая)
     const POWERUP_DURATION = 8000;  // Длительность бонусов в мс
+    const LIFE_BONUS_POINTS = 500;  // Очки за бонус жизни при максимальном количестве жизней
 
     // Настройки комбо и очков
     const COMBO_TIMEOUT = 3000;  // Время до сброса комбо (мс)
@@ -61,12 +65,11 @@ document.addEventListener('DOMContentLoaded', () => {
     const PARTICLE_SPEED = 2.5;
 
     // Прогресс уровней
-    const POINTS_PER_LEVEL = 1000;  // Очков для повышения уровня
+    const POINTS_PER_LEVEL = 15000;  // Очков для повышения уровня
     const MAX_LEVEL = 10;
 
-    // Фоны и смена фона
-    const BACKGROUND_CHANGE_INTERVAL = 30000;  // 30 секунд между сменой фона
-    const BACKGROUND_TRANSITION_DURATION = 2000;  // 2 секунды на переход
+    // Настройки темноты по уровням
+    const DARKNESS_LEVEL_THRESHOLD = 7; // С какого уровня начинается потемнение
 
     // Пузырьки
     const BUBBLE_COUNT = 15;
@@ -89,11 +92,11 @@ document.addEventListener('DOMContentLoaded', () => {
     let isImmune = false;
     let immuneTimer = 0;
     let gameTime = 0;  // Общее время игры в мс
-    let backgroundChangeTimer = 0;  // Таймер для автоматической смены фона
     let gameStats = {
         treasuresCollected: 0,
         obstaclesHit: 0,
         powerUpsCollected: 0,
+        extraLivesCollected: 0, // Статистика для жизней
         maxCombo: 1,
         timeAlive: 0
     };
@@ -103,16 +106,6 @@ document.addEventListener('DOMContentLoaded', () => {
         magnet: { active: false, endTime: 0 },
         shield: { active: false, endTime: 0 },
         star: { active: false, endTime: 0 }  // Звезда = двойные очки
-    };
-
-    // Система смены фонов
-    let backgroundIndex = 0;
-    let backgroundTransition = {
-        active: false,
-        from: 0,
-        to: 0,
-        progress: 0,
-        duration: BACKGROUND_TRANSITION_DURATION
     };
 
     // Переменные анимации и рендеринга
@@ -353,13 +346,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             // Проверка эффекта магнита
-            if (activePowerUps.magnet.active && item.type === 'treasure') {
+            if (activePowerUps.magnet.active && (item.type === 'treasure' || item.type === 'extraLife')) {
                 const dx = this.x - item.x - item.width / 2;
                 const dy = this.y - item.y - item.height / 2;
                 const distance = Math.sqrt(dx * dx + dy * dy);
 
                 if (distance < MAGNET_RADIUS) {
-                    // Притягиваем сокровище к игроку
+                    // Притягиваем сокровище или бонус жизни к игроку
                     const nx = dx / distance;
                     const ny = dy / distance;
                     const attractionForce = (MAGNET_RADIUS - distance) * 0.05;
@@ -396,7 +389,7 @@ document.addEventListener('DOMContentLoaded', () => {
             this.image = image;
             this.baseWidth = image ? image.naturalWidth : 30;
             this.baseHeight = image ? image.naturalHeight : 30;
-            this.type = type;  // 'treasure', 'obstacle', 'special', 'powerup'
+            this.type = type;  // 'treasure', 'obstacle', 'special', 'powerup', 'extraLife'
             this.value = value;
             this.expires = expires ? Date.now() + expires : null;
             this.powerUpType = powerUpType;  // 'magnet', 'shield', 'star'
@@ -410,6 +403,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let sizeMultiplier = 1;
             if (type === 'special') sizeMultiplier = 1.5;
             if (type === 'powerup') sizeMultiplier = 1.2;
+            if (type === 'extraLife') sizeMultiplier = 1.3; // Бонус жизни чуть больше обычных бонусов
 
             // Рассчитываем масштабированный размер с сохранением пропорций
             const ratio = Math.min(
@@ -479,6 +473,37 @@ document.addEventListener('DOMContentLoaded', () => {
                 ctx.arc(0, 0, this.width * 0.8 * pulseSize, 0, Math.PI * 2);
                 ctx.fill();
 
+                ctx.globalAlpha = 1.0;
+            } else if (this.type === 'extraLife') {
+                // Свечение для бонуса жизни (сердце)
+                // Пульсирующее красное свечение
+                const pulseSize = 1 + Math.sin(gameTime * 0.01) * 0.15;
+                ctx.globalAlpha = 0.6 + Math.sin(gameTime * 0.01) * 0.3;
+
+                const gradient = ctx.createRadialGradient(0, 0, 0, 0, 0, this.width * 0.9 * pulseSize);
+                gradient.addColorStop(0, '#e74c3c');
+                gradient.addColorStop(0.6, 'rgba(231, 76, 60, 0.4)');
+                gradient.addColorStop(1, 'rgba(231, 76, 60, 0)');
+
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.arc(0, 0, this.width * 0.9 * pulseSize, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Добавляем мерцающие частицы вокруг сердца
+                ctx.globalAlpha = 0.8;
+                for (let i = 0; i < 4; i++) {
+                    const angle = (Math.PI * 2 / 4) * i + (gameTime * 0.002);
+                    const distance = this.width * 0.7;
+                    const x = Math.cos(angle) * distance;
+                    const y = Math.sin(angle) * distance;
+                    const sparkSize = 3 + Math.sin(gameTime * 0.02 + i) * 2;
+
+                    ctx.fillStyle = '#ff7675';
+                    ctx.beginPath();
+                    ctx.arc(x, y, sparkSize, 0, Math.PI * 2);
+                    ctx.fill();
+                }
                 ctx.globalAlpha = 1.0;
             } else if (this.type === 'special') {
                 // Искрящийся эффект для особых предметов
@@ -725,7 +750,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (loadingBar) loadingBar.style.width = '0%';
         if (loadingText) loadingText.textContent = 'Загрузка ресурсов...';
 
-        // Определяем ресурсы для загрузки
+        // Определяем ресурсы для загрузки (только необходимые для игры без фоновых картинок)
         const assetMap = {
             shark: 'img-shark',
             coin: 'img-coin',
@@ -735,13 +760,10 @@ document.addEventListener('DOMContentLoaded', () => {
             urchin: 'img-urchin',
             trash: 'img-trash',
             chest: 'img-chest',
-            background1: 'img-background1',
-            background2: 'img-background2',
-            background3: 'img-background3',
-            background4: 'img-background4',
             magnet: 'img-magnet',
             shield: 'img-shield',
-            star: 'img-star'
+            star: 'img-star',
+            heart: 'img-heart'
         };
 
         totalAssets = Object.keys(assetMap).length;
@@ -833,7 +855,6 @@ document.addEventListener('DOMContentLoaded', () => {
         level = 1;
         lives = 3;
         gameTime = 0;
-        backgroundChangeTimer = 0;
         itemSpeed = INITIAL_ITEM_SPEED;
         spawnInterval = INITIAL_SPAWN_INTERVAL;
         obstacleProbability = INITIAL_OBSTACLE_PROBABILITY;
@@ -842,6 +863,9 @@ document.addEventListener('DOMContentLoaded', () => {
         particles = [];
         isImmune = false;
         immuneTimer = 0;
+
+        // Сбрасываем темноту на начальный уровень
+        updateDarknessLevel(1);
 
         // Сбрасываем бонусы
         activePowerUps = {
@@ -855,6 +879,7 @@ document.addEventListener('DOMContentLoaded', () => {
             treasuresCollected: 0,
             obstaclesHit: 0,
             powerUpsCollected: 0,
+            extraLivesCollected: 0,
             maxCombo: 1,
             timeAlive: 0
         };
@@ -897,17 +922,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (gameState === 'PLAYING') {
             updateGame(deltaTime);
             gameTime += deltaTime * 1000;
-
-            // Таймер для автоматической смены фона
-            backgroundChangeTimer += deltaTime * 1000;
-            if (backgroundChangeTimer >= BACKGROUND_CHANGE_INTERVAL) {
-                changeBackground();
-                backgroundChangeTimer = 0;
-            }
         }
-
-        // Всегда обновляем анимацию перехода фона
-        updateBackgroundTransition(deltaTime);
 
         // Всегда рендерим (даже во время паузы/окончания игры)
         renderGame(deltaTime);
@@ -925,6 +940,9 @@ document.addEventListener('DOMContentLoaded', () => {
         if (shark) {
             shark.update(logicalMousePos.x, logicalMousePos.y, deltaTime);
         }
+
+        // Проверяем повышение уровня
+        checkLevelUp();
 
         // Обновляем статус иммунитета
         if (isImmune) {
@@ -1041,16 +1059,17 @@ document.addEventListener('DOMContentLoaded', () => {
         bubbles.forEach(bubble => bubble.update(deltaTime));
     }
 
-    function updateBackgroundTransition(deltaTime) {
-        // Обновляем прогресс перехода фона
-        if (backgroundTransition.active) {
-            backgroundTransition.progress += deltaTime / (backgroundTransition.duration / 1000);
+    function updateDarknessLevel(newLevel) {
+        // Обновляем темноту океана в зависимости от уровня
+        if (!darknessOverlay) return;
 
-            if (backgroundTransition.progress >= 1) {
-                backgroundTransition.active = false;
-                backgroundTransition.progress = 0;
-            }
-        }
+        // Определяем класс темноты в зависимости от уровня
+        const darknessClass = newLevel >= DARKNESS_LEVEL_THRESHOLD ?
+            `darkness-level-${Math.min(4, newLevel - DARKNESS_LEVEL_THRESHOLD + 1)}` :
+            'darkness-level-1';
+
+        // Обновляем класс
+        darknessOverlay.className = `darkness-overlay ${darknessClass}`;
     }
 
     function renderGame(deltaTime) {
@@ -1063,13 +1082,7 @@ document.addEventListener('DOMContentLoaded', () => {
         // Устанавливаем масштаб для логических координат
         ctx.scale(scale, scale);
 
-        // Рисуем фон
-        drawBackground();
-
-        // Рисуем пузырьки
-        bubbles.forEach(bubble => bubble.draw(ctx));
-
-        // Рисуем все игровые объекты
+        // Рисуем все игровые объекты (CSS фон не нужно рисовать через canvas)
         items.forEach(item => item.draw(ctx));
 
         // Рисуем игрока
@@ -1084,55 +1097,6 @@ document.addEventListener('DOMContentLoaded', () => {
         ctx.restore();
     }
 
-    function drawBackground() {
-        // Рисуем фон с плавным переходом между изображениями
-        if (backgroundTransition.active) {
-            // Отрисовка с прозрачностью для эффекта перехода
-            ctx.globalAlpha = 1 - backgroundTransition.progress;
-
-            // Рисуем уходящий фон
-            const fromImg = assets[`background${backgroundTransition.from + 1}`];
-            if (fromImg) {
-                ctx.drawImage(fromImg, 0, 0, BASE_WIDTH, BASE_HEIGHT);
-            }
-
-            // Рисуем новый фон с нарастающей прозрачностью
-            ctx.globalAlpha = backgroundTransition.progress;
-            const toImg = assets[`background${backgroundTransition.to + 1}`];
-            if (toImg) {
-                ctx.drawImage(toImg, 0, 0, BASE_WIDTH, BASE_HEIGHT);
-            }
-
-            // Восстанавливаем прозрачность
-            ctx.globalAlpha = 1.0;
-        } else {
-            // Рисуем текущий фон без эффекта перехода
-            const backgroundImg = assets[`background${backgroundIndex + 1}`];
-            if (backgroundImg) {
-                ctx.drawImage(backgroundImg, 0, 0, BASE_WIDTH, BASE_HEIGHT);
-            } else {
-                // Запасной вариант, если изображение не загружено
-                const gradient = ctx.createLinearGradient(0, 0, 0, BASE_HEIGHT);
-                gradient.addColorStop(0, '#0a1622');
-                gradient.addColorStop(1, '#1a3c5f');
-                ctx.fillStyle = gradient;
-                ctx.fillRect(0, 0, BASE_WIDTH, BASE_HEIGHT);
-            }
-        }
-    }
-
-    function changeBackground() {
-        if (!backgroundTransition.active) {
-            backgroundTransition.active = true;
-            backgroundTransition.from = backgroundIndex;
-            backgroundTransition.to = (backgroundIndex + 1) % 4;
-            backgroundTransition.progress = 0;
-
-            // Устанавливаем новый индекс фона
-            backgroundIndex = (backgroundIndex + 1) % 4;
-        }
-    }
-
     function spawnItem() {
         // Определяем тип предмета на основе вероятностей
         const rand = Math.random();
@@ -1142,8 +1106,14 @@ document.addEventListener('DOMContentLoaded', () => {
         let expires = null;
         let powerUpType = null;
 
-        // Логика спавна бонусов
-        if (rand < POWERUP_PROBABILITY && (assets.magnet || assets.shield || assets.star)) {
+        // Логика спавна бонуса жизни (самый редкий)
+        if (rand < EXTRA_LIFE_PROBABILITY && assets.heart) {
+            type = 'extraLife';
+            imageKey = 'heart';
+            value = 50; // Базовая стоимость бонуса жизни
+        }
+        // Логика спавна других бонусов
+        else if (rand < EXTRA_LIFE_PROBABILITY + POWERUP_PROBABILITY && (assets.magnet || assets.shield || assets.star)) {
             type = 'powerup';
 
             // Выбираем тип бонуса
@@ -1173,14 +1143,14 @@ document.addEventListener('DOMContentLoaded', () => {
             value = 50;
         }
         // Особый предмет (сундук с сокровищами)
-        else if (rand < POWERUP_PROBABILITY + SPECIAL_PROBABILITY && assets.chest) {
+        else if (rand < EXTRA_LIFE_PROBABILITY + POWERUP_PROBABILITY + SPECIAL_PROBABILITY && assets.chest) {
             type = 'special';
             imageKey = 'chest';
             value = 100 * level;  // Масштабируем с уровнем
             expires = 5000;  // 5 секунд на сбор
         }
         // Препятствие
-        else if (rand < POWERUP_PROBABILITY + SPECIAL_PROBABILITY + obstacleProbability) {
+        else if (rand < EXTRA_LIFE_PROBABILITY + POWERUP_PROBABILITY + SPECIAL_PROBABILITY + obstacleProbability) {
             type = 'obstacle';
             value = 0;
 
@@ -1275,7 +1245,35 @@ document.addEventListener('DOMContentLoaded', () => {
 
             // Проверяем повышение уровня
             checkLevelUp();
+        } else if (item.type === 'extraLife') {
+            // Обработка сбора бонуса жизни
+            gameStats.extraLivesCollected++;
 
+            // Проверяем, не достигнут ли максимум жизней
+            if (lives < MAX_LIVES) {
+                // Добавляем жизнь
+                lives++;
+                // Визуальный эффект красного цвета (сердце)
+                createParticles(
+                    item.x + item.width / 2,
+                    item.y + item.height / 2,
+                    '#e74c3c',  // Красный цвет для эффекта жизни
+                    PARTICLE_COUNT_COLLECT * 2
+                );
+            } else {
+                // Если максимум жизней, даём очки
+                score += LIFE_BONUS_POINTS * Math.min(combo, COMBO_MULTIPLIER_MAX);
+                // Визуальный эффект золотого цвета (очки)
+                createParticles(
+                    item.x + item.width / 2,
+                    item.y + item.height / 2,
+                    '#f1c40f',  // Золотой цвет для эффекта очков
+                    PARTICLE_COUNT_COLLECT
+                );
+                // Увеличиваем комбо
+                combo++;
+                comboTimer = 0;
+            }
         } else if (item.type === 'obstacle') {
             // Обработка столкновения с препятствием
             if (!isImmune && !activePowerUps.shield.active) {
@@ -1344,7 +1342,6 @@ document.addEventListener('DOMContentLoaded', () => {
     function checkLevelUp() {
         // Проверяем, нужно ли повысить уровень
         const nextLevel = Math.floor(score / POINTS_PER_LEVEL) + 1;
-
         if (nextLevel > level && nextLevel <= MAX_LEVEL) {
             // Повышаем уровень
             level = nextLevel;
@@ -1357,16 +1354,15 @@ document.addEventListener('DOMContentLoaded', () => {
             // Обеспечиваем минимальный интервал спавна
             spawnInterval = Math.max(spawnInterval, 300);
 
+            // Обновляем темноту в зависимости от уровня
+            updateDarknessLevel(level);
+
             // Эффект повышения уровня
             if (levelUpAnimation) {
                 levelUpAnimation.classList.remove('level-up-active');
                 void levelUpAnimation.offsetWidth; // Вызываем reflow
                 levelUpAnimation.classList.add('level-up-active');
             }
-
-            // Меняем фон при повышении уровня
-            changeBackground();
-            backgroundChangeTimer = 0;
 
             console.log(`Уровень повышен! Теперь уровень ${level}`);
         }
@@ -1403,9 +1399,9 @@ document.addEventListener('DOMContentLoaded', () => {
         gameState = 'GAME_OVER';
 
         if (animationFrameId) {
-        cancelAnimationFrame(animationFrameId);
-        animationFrameId = null;
-    }
+            cancelAnimationFrame(animationFrameId);
+            animationFrameId = null;
+        }
 
         // Рассчитываем итоговую статистику
         gameStats.timeAlive = Math.floor(gameTime / 1000);  // Переводим в секунды
@@ -1419,6 +1415,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 <div>Время игры: <span>${formatTime(gameStats.timeAlive)}</span></div>
                 <div>Собрано сокровищ: <span>${gameStats.treasuresCollected}</span></div>
                 <div>Собрано бонусов: <span>${gameStats.powerUpsCollected}</span></div>
+                <div>Собрано жизней: <span>${gameStats.extraLivesCollected}</span></div>
                 <div>Макс. комбо: <span>x${gameStats.maxCombo}</span></div>
             </div>
             <small>Сможете лучше?</small>
@@ -1477,7 +1474,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function handleRestartClick() {
-        // ВАЖНО: Исправлен обработчик для корректного перезапуска
         if (gameState === 'GAME_OVER') {
             // Скрываем кнопку перезапуска
             restartButton.style.display = 'none';

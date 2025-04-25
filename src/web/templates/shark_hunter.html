@@ -12,7 +12,7 @@
         align-items: center;
         overflow: hidden;
         position: relative;
-        background-color: #0a1622;
+        background: linear-gradient(to bottom, #0a1c30 0%, #1a3c5f 50%, #0f2540 100%);
         border-radius: 0 0 4px 4px;
         min-height: 500px;
         box-shadow: inset 0 0 30px rgba(0,0,0,0.4);
@@ -25,8 +25,335 @@
         height: 100%;
         cursor: none;
         position: relative;
+        z-index: 2;
+    }
+
+    /* Анимированный фон океана */
+    .ocean-background {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 1;
+        overflow: hidden;
+    }
+
+    /* Лучи света, проникающие сверху */
+    .light-rays {
+        position: absolute;
+        top: -50px;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        opacity: 0.5;
+    }
+
+    .light-ray {
+        position: absolute;
+        top: 0;
+        width: 80px;
+        height: 200%;
+        background: linear-gradient(to bottom, rgba(255,255,255,0.15) 0%, rgba(255,255,255,0) 70%);
+        transform-origin: top center;
+        animation: ray-flicker 8s infinite both;
+        opacity: 0.4;
+        filter: blur(10px);
+    }
+
+    .ray1 { left: 10%; animation-delay: -2s; }
+    .ray2 { left: 25%; animation-delay: -1s; }
+    .ray3 { left: 40%; animation-delay: -3s; }
+    .ray4 { left: 65%; animation-delay: -2.5s; }
+    .ray5 { left: 85%; animation-delay: -1.5s; }
+
+    @keyframes ray-flicker {
+        0%, 100% { transform: rotate(0deg); opacity: 0.4; }
+        25% { transform: rotate(1deg); opacity: 0.5; }
+        50% { transform: rotate(-1deg); opacity: 0.3; }
+        75% { transform: rotate(2deg); opacity: 0.45; }
+    }
+
+    /* Дальний слой - подводные горы и ландшафт */
+    .deep-layer {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 200%;
+        height: 30%;
+        background:
+            radial-gradient(ellipse at 10% 100%, rgba(30, 60, 80, 0.6) 0%, rgba(30, 60, 80, 0) 70%) no-repeat,
+            radial-gradient(ellipse at 30% 100%, rgba(40, 70, 90, 0.5) 0%, rgba(40, 70, 90, 0) 60%) no-repeat,
+            radial-gradient(ellipse at 50% 100%, rgba(50, 80, 100, 0.4) 0%, rgba(50, 80, 100, 0) 65%) no-repeat,
+            radial-gradient(ellipse at 70% 100%, rgba(35, 65, 85, 0.6) 0%, rgba(35, 65, 85, 0) 70%) no-repeat,
+            radial-gradient(ellipse at 90% 100%, rgba(45, 75, 95, 0.5) 0%, rgba(45, 75, 95, 0) 60%) no-repeat;
+        filter: blur(4px);
+        animation: deep-layer-move 120s linear infinite;
         z-index: 1;
     }
+
+    @keyframes deep-layer-move {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(-50%); }
+    }
+
+    /* Средний слой - водоросли и кораллы */
+    .mid-layer {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 200%;
+        height: 100%;
+        z-index: 2;
+        animation: mid-layer-move 80s linear infinite;
+    }
+
+    @keyframes mid-layer-move {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(-50%); }
+    }
+
+    /* Кораллы */
+    .coral-group {
+        position: absolute;
+        bottom: 0;
+        width: 100%;
+        height: 25%;
+    }
+
+    .coral {
+        position: absolute;
+        bottom: 0;
+        transform-origin: bottom center;
+        filter: blur(1px);
+    }
+
+    .coral1 {
+        right: 5%;
+        height: 120px;
+        width: 30px;
+        background: radial-gradient(ellipse at bottom, rgba(255, 100, 100, 0.4) 0%, rgba(255, 100, 100, 0.2) 50%, rgba(255, 100, 100, 0) 100%);
+        animation: coral-sway 8s ease-in-out infinite;
+    }
+
+    .coral2 {
+        right: 15%;
+        height: 100px;
+        width: 25px;
+        background: radial-gradient(ellipse at bottom, rgba(255, 200, 100, 0.4) 0%, rgba(255, 200, 100, 0.2) 50%, rgba(255, 200, 100, 0) 100%);
+        animation: coral-sway 9s ease-in-out -2s infinite;
+    }
+
+    .coral3 {
+        right: 25%;
+        height: 150px;
+        width: 35px;
+        background: radial-gradient(ellipse at bottom, rgba(100, 255, 180, 0.4) 0%, rgba(100, 255, 180, 0.2) 50%, rgba(100, 255, 180, 0) 100%);
+        animation: coral-sway 7s ease-in-out -1s infinite;
+    }
+
+    .coral4 {
+        right: 40%;
+        height: 130px;
+        width: 30px;
+        background: radial-gradient(ellipse at bottom, rgba(170, 100, 255, 0.4) 0%, rgba(170, 100, 255, 0.2) 50%, rgba(170, 100, 255, 0) 100%);
+        animation: coral-sway 10s ease-in-out -3s infinite;
+    }
+
+    .coral5 {
+        right: 55%;
+        height: 110px;
+        width: 28px;
+        background: radial-gradient(ellipse at bottom, rgba(100, 180, 255, 0.4) 0%, rgba(100, 180, 255, 0.2) 50%, rgba(100, 180, 255, 0) 100%);
+        animation: coral-sway 8.5s ease-in-out -2.5s infinite;
+    }
+
+    .coral6 {
+        right: 70%;
+        height: 140px;
+        width: 32px;
+        background: radial-gradient(ellipse at bottom, rgba(255, 130, 180, 0.4) 0%, rgba(255, 130, 180, 0.2) 50%, rgba(255, 130, 180, 0) 100%);
+        animation: coral-sway 9.5s ease-in-out -1.5s infinite;
+    }
+
+    .coral7 {
+        right: 85%;
+        height: 120px;
+        width: 30px;
+        background: radial-gradient(ellipse at bottom, rgba(140, 255, 210, 0.4) 0%, rgba(140, 255, 210, 0.2) 50%, rgba(140, 255, 210, 0) 100%);
+        animation: coral-sway 7.5s ease-in-out -3.5s infinite;
+    }
+
+    @keyframes coral-sway {
+        0%, 100% { transform: rotate(-2deg) scaleY(1.01); }
+        50% { transform: rotate(3deg) scaleY(0.99); }
+    }
+
+    /* Передний план - пузырьки и частицы */
+    .front-layer {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 3;
+        pointer-events: none;
+    }
+
+    /* Пузырьки */
+    .bubble {
+        position: absolute;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.8), rgba(255,255,255,0.1));
+        opacity: 0;
+        animation: bubble-rise var(--rise-duration, 8s) ease-in infinite;
+        animation-delay: var(--rise-delay, 0s);
+        z-index: 4;
+    }
+
+    .b1 { left: 10%; bottom: -20px; width: 10px; height: 10px; --rise-duration: 8s; --rise-delay: -1s; }
+    .b2 { left: 20%; bottom: -20px; width: 6px; height: 6px; --rise-duration: 6s; --rise-delay: -2s; }
+    .b3 { left: 35%; bottom: -20px; width: 8px; height: 8px; --rise-duration: 7s; --rise-delay: -3s; }
+    .b4 { left: 50%; bottom: -20px; width: 12px; height: 12px; --rise-duration: 9s; --rise-delay: -4s; }
+    .b5 { left: 65%; bottom: -20px; width: 7px; height: 7px; --rise-duration: 7.5s; --rise-delay: -2.5s; }
+    .b6 { left: 80%; bottom: -20px; width: 9px; height: 9px; --rise-duration: 8.5s; --rise-delay: -1.5s; }
+    .b7 { left: 90%; bottom: -20px; width: 5px; height: 5px; --rise-duration: 6.5s; --rise-delay: -0.5s; }
+    .b8 { left: 15%; bottom: -20px; width: 11px; height: 11px; --rise-duration: 8.2s; --rise-delay: -3.2s; }
+    .b9 { left: 30%; bottom: -20px; width: 8px; height: 8px; --rise-duration: 7.2s; --rise-delay: -2.7s; }
+    .b10 { left: 45%; bottom: -20px; width: 6px; height: 6px; --rise-duration: 6.7s; --rise-delay: -1.7s; }
+    .b11 { left: 60%; bottom: -20px; width: 10px; height: 10px; --rise-duration: 8.7s; --rise-delay: -4.7s; }
+    .b12 { left: 75%; bottom: -20px; width: 7px; height: 7px; --rise-duration: 7.7s; --rise-delay: -3.7s; }
+    .b13 { left: 85%; bottom: -20px; width: 9px; height: 9px; --rise-duration: 8.3s; --rise-delay: -2.3s; }
+    .b14 { left: 25%; bottom: -20px; width: 5px; height: 5px; --rise-duration: 6.3s; --rise-delay: -4.3s; }
+    .b15 { left: 55%; bottom: -20px; width: 8px; height: 8px; --rise-duration: 7.3s; --rise-delay: -5.3s; }
+
+    @keyframes bubble-rise {
+        0% {
+            opacity: 0;
+            transform: translateY(0) translateX(0);
+        }
+        10% {
+            opacity: 0.7;
+        }
+        100% {
+            opacity: 0;
+            transform: translateY(-100vh) translateX(calc(var(--rise-duration, 8s) * -5px));
+        }
+    }
+
+    /* Плавающие частицы воды */
+    .particle {
+        position: absolute;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 50%;
+        opacity: 0;
+        filter: blur(1px);
+        animation: particle-drift var(--drift-duration, 15s) linear infinite;
+        animation-delay: var(--drift-delay, 0s);
+    }
+
+    .p1 { top: 15%; left: 10%; width: 2px; height: 2px; --drift-duration: 15s; --drift-delay: -1s; }
+    .p2 { top: 25%; left: 30%; width: 3px; height: 3px; --drift-duration: 18s; --drift-delay: -2s; }
+    .p3 { top: 40%; left: 20%; width: 2px; height: 2px; --drift-duration: 20s; --drift-delay: -3s; }
+    .p4 { top: 60%; left: 40%; width: 3px; height: 3px; --drift-duration: 17s; --drift-delay: -4s; }
+    .p5 { top: 75%; left: 15%; width: 2px; height: 2px; --drift-duration: 19s; --drift-delay: -5s; }
+    .p6 { top: 20%; left: 60%; width: 3px; height: 3px; --drift-duration: 16s; --drift-delay: -6s; }
+    .p7 { top: 35%; left: 70%; width: 2px; height: 2px; --drift-duration: 21s; --drift-delay: -7s; }
+    .p8 { top: 55%; left: 85%; width: 3px; height: 3px; --drift-duration: 14s; --drift-delay: -8s; }
+    .p9 { top: 80%; left: 75%; width: 2px; height: 2px; --drift-duration: 16s; --drift-delay: -9s; }
+    .p10 { top: 30%; left: 50%; width: 3px; height: 3px; --drift-duration: 18s; --drift-delay: -10s; }
+
+    @keyframes particle-drift {
+        0% {
+            opacity: 0;
+            transform: translate(0, 0);
+        }
+        10% {
+            opacity: 0.5;
+        }
+        90% {
+            opacity: 0.5;
+        }
+        100% {
+            opacity: 0;
+            transform: translate(40px, 20px);
+        }
+    }
+
+    /* Косяки рыб на заднем плане */
+    .fish-school {
+        position: absolute;
+        background: rgba(200, 220, 255, 0.2);
+        border-radius: 50% 60% 40% 70%;
+        filter: blur(5px);
+        animation: school-swim var(--swim-duration, 40s) linear infinite;
+        z-index: 1;
+    }
+
+    .school1 {
+        top: 20%;
+        right: -10%;
+        width: 140px;
+        height: 60px;
+        --swim-duration: 40s;
+    }
+
+    .school2 {
+        top: 50%;
+        right: -15%;
+        width: 160px;
+        height: 70px;
+        --swim-duration: 45s;
+    }
+
+    .school3 {
+        top: 70%;
+        right: -5%;
+        width: 120px;
+        height: 50px;
+        --swim-duration: 35s;
+    }
+
+    @keyframes school-swim {
+        0% { transform: translateX(0); }
+        100% { transform: translateX(-120vw); }
+    }
+
+    /* Эффект глубины справа (затемнение) */
+    .ocean-depth-right {
+        position: absolute;
+        top: 0;
+        right: 0;
+        height: 100%;
+        width: 200px;
+        background: linear-gradient(90deg,
+            rgba(10, 22, 34, 0) 0%,
+            rgba(8, 24, 38, 0.1) 30%,
+            rgba(5, 18, 32, 0.3) 60%,
+            rgba(3, 15, 28, 0.8) 100%);
+        z-index: 5;
+        pointer-events: none;
+    }
+
+    /* Темнота для высоких уровней */
+    .darkness-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0);
+        z-index: 8;
+        pointer-events: none;
+        transition: background 2s ease-in-out;
+    }
+
+    /* Классы для разных уровней темноты */
+    .darkness-level-1 { background: rgba(0, 0, 0, 0); }
+    .darkness-level-2 { background: rgba(0, 0, 0, 0.1); }
+    .darkness-level-3 { background: rgba(0, 0, 0, 0.2); }
+    .darkness-level-4 { background: rgba(0, 0, 0, 0.3); }
 
     /* Экран загрузки */
     #loading-screen {
@@ -136,7 +463,7 @@
         transform: translateX(-50%);
         display: flex;
         gap: 10px;
-        z-index: 3;
+        z-index: 10;
         pointer-events: none;
     }
 
@@ -321,6 +648,77 @@
 <div class="panel" id="game-panel">
     <div class="panel-header">Игровое поле</div>
     <div class="panel-body" id="game-area">
+        <!-- Анимированный фон океана -->
+        <div class="ocean-background">
+            <!-- Лучи света -->
+            <div class="light-rays">
+                <div class="light-ray ray1"></div>
+                <div class="light-ray ray2"></div>
+                <div class="light-ray ray3"></div>
+                <div class="light-ray ray4"></div>
+                <div class="light-ray ray5"></div>
+            </div>
+
+            <!-- Косяки рыб -->
+            <div class="fish-school school1"></div>
+            <div class="fish-school school2"></div>
+            <div class="fish-school school3"></div>
+
+            <!-- Дальний слой - подводные горы -->
+            <div class="deep-layer"></div>
+
+            <!-- Средний слой - кораллы и водоросли -->
+            <div class="mid-layer">
+                <div class="coral-group">
+                    <div class="coral coral1"></div>
+                    <div class="coral coral2"></div>
+                    <div class="coral coral3"></div>
+                    <div class="coral coral4"></div>
+                    <div class="coral coral5"></div>
+                    <div class="coral coral6"></div>
+                    <div class="coral coral7"></div>
+                </div>
+            </div>
+
+            <!-- Передний слой - пузырьки и частицы -->
+            <div class="front-layer">
+                <!-- Пузырьки -->
+                <div class="bubble b1"></div>
+                <div class="bubble b2"></div>
+                <div class="bubble b3"></div>
+                <div class="bubble b4"></div>
+                <div class="bubble b5"></div>
+                <div class="bubble b6"></div>
+                <div class="bubble b7"></div>
+                <div class="bubble b8"></div>
+                <div class="bubble b9"></div>
+                <div class="bubble b10"></div>
+                <div class="bubble b11"></div>
+                <div class="bubble b12"></div>
+                <div class="bubble b13"></div>
+                <div class="bubble b14"></div>
+                <div class="bubble b15"></div>
+
+                <!-- Частицы -->
+                <div class="particle p1"></div>
+                <div class="particle p2"></div>
+                <div class="particle p3"></div>
+                <div class="particle p4"></div>
+                <div class="particle p5"></div>
+                <div class="particle p6"></div>
+                <div class="particle p7"></div>
+                <div class="particle p8"></div>
+                <div class="particle p9"></div>
+                <div class="particle p10"></div>
+            </div>
+        </div>
+
+        <!-- Эффект глубины справа -->
+        <div class="ocean-depth-right"></div>
+
+        <!-- Слой темноты для высоких уровней -->
+        <div id="darkness-overlay" class="darkness-overlay darkness-level-1"></div>
+
         <!-- Основной игровой холст -->
         <canvas id="gameCanvas"></canvas>
 
@@ -333,7 +731,7 @@
             <div id="loading-text">Загрузка ресурсов...</div>
         </div>
 
-        <!-- Новая панель статистики вверху -->
+        <!-- Панель статистики вверху -->
         <div class="game-stats-bar">
             <div class="stats-left">
                 <div id="score-display" class="stat-item">Очки: 0</div>
@@ -370,13 +768,10 @@
 <img src="{{ url_for('static', filename='img/urchin.png') }}" class="game-asset-loader" id="img-urchin">
 <img src="{{ url_for('static', filename='img/trash.png') }}" class="game-asset-loader" id="img-trash">
 <img src="{{ url_for('static', filename='img/treasure_chest.png') }}" class="game-asset-loader" id="img-chest">
-<img src="{{ url_for('static', filename='img/underwater_bg_1.jpg') }}" class="game-asset-loader" id="img-background1">
-<img src="{{ url_for('static', filename='img/underwater_bg_2.jpg') }}" class="game-asset-loader" id="img-background2">
-<img src="{{ url_for('static', filename='img/underwater_bg_3.jpg') }}" class="game-asset-loader" id="img-background3">
-<img src="{{ url_for('static', filename='img/underwater_bg_4.jpg') }}" class="game-asset-loader" id="img-background4">
 <img src="{{ url_for('static', filename='img/magnet.png') }}" class="game-asset-loader" id="img-magnet">
 <img src="{{ url_for('static', filename='img/shield.png') }}" class="game-asset-loader" id="img-shield">
 <img src="{{ url_for('static', filename='img/star.png') }}" class="game-asset-loader" id="img-star">
+<img src="{{ url_for('static', filename='img/heart.png') }}" class="game-asset-loader" id="img-heart">
 
 {% endblock %}
 

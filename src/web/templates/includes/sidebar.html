@@ -29,11 +29,35 @@
     </ul>
     
     {% if session.get('user_role') == 'admin' %}
-    <!-- Пасхалка в виде плавающего пузырька -->
-    <div class="bubble-easter-egg">
+    <!-- Пасхалка в виде плавающей акулы -->
+    <div class="shark-easter-egg">
         <a href="{{ url_for('shark_hunter_game') }}" title="Подводная игра">
-            <div class="bubble">
-                <span class="bubble-content">💎</span>
+            <div class="ocean-scene">
+                <div class="water-surface"></div>
+                <div class="shark">
+                    <img src="{{ url_for('static', filename='img/shark_player.png') }}" alt="Акула">
+                </div>
+                <div class="splash-container splash-left">
+                    <div class="splash-drop s1"></div>
+                    <div class="splash-drop s2"></div>
+                    <div class="splash-drop s3"></div>
+                    <div class="splash-drop s4"></div>
+                    <div class="splash-drop s5"></div>
+                    <div class="splash-circle"></div>
+                </div>
+                <div class="splash-container splash-right">
+                    <div class="splash-drop s1"></div>
+                    <div class="splash-drop s2"></div>
+                    <div class="splash-drop s3"></div>
+                    <div class="splash-drop s4"></div>
+                    <div class="splash-drop s5"></div>
+                    <div class="splash-circle"></div>
+                </div>
+                <div class="bubble b1"></div>
+                <div class="bubble b2"></div>
+                <div class="bubble b3"></div>
+                <div class="bubble b4"></div>
+                <div class="bubble b5"></div>
             </div>
         </a>
     </div>
@@ -41,54 +65,290 @@
 </div>
 
 <style>
-.bubble-easter-egg {
+.shark-easter-egg {
     position: absolute;
-    bottom: 80px;
-    left: 90px;
+    bottom: 20px;
+    left: 20px;
+    width: 180px;
+    height: 100px;
     z-index: 999;
+    overflow: hidden;
 }
 
-.bubble {
-    width: 30px;
-    height: 30px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.8), rgba(52, 152, 219, 0.3));
-    box-shadow: 0 0 10px rgba(52, 152, 219, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
+.ocean-scene {
     position: relative;
-    opacity: 0.6;
-    transition: opacity 0.3s, transform 0.3s;
-    animation: bubble-float 5s ease-in-out infinite;
+    width: 100%;
+    height: 100%;
 }
 
-.bubble:hover {
-    opacity: 1;
-    transform: scale(1.2);
-}
-
-.bubble::after {
-    content: '';
+.water-surface {
     position: absolute;
-    top: 7px;
-    left: 7px;
+    top: 40px;
+    left: 0;
+    width: 100%;
+    height: 2px;
+    background: rgba(173, 216, 230, 0.7);
+    z-index: 1;
+}
+
+.shark {
+    position: absolute;
+    width: 50px;
+    height: 30px;
+    z-index: 2;
+    transform-origin: center center;
+    will-change: transform;
+    animation: shark-path 12s cubic-bezier(0.445, 0.05, 0.55, 0.95) infinite;
+}
+
+.shark img {
+    width: 100%;
+    height: auto;
+    will-change: transform;
+    animation: shark-flip 12s linear infinite;
+}
+
+/* Пузырьки */
+.bubble {
+    position: absolute;
+    background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.8), rgba(173, 216, 230, 0.3));
+    border-radius: 50%;
+    z-index: 0;
+    opacity: 0;
+}
+
+.b1 {
+    width: 8px;
+    height: 8px;
+    animation: bubble-float 6s ease-in 2s infinite;
+}
+
+.b2 {
+    width: 6px;
+    height: 6px;
+    animation: bubble-float 5s ease-in 4s infinite;
+}
+
+.b3 {
+    width: 10px;
+    height: 10px;
+    animation: bubble-float 7s ease-in 1s infinite;
+}
+
+.b4 {
     width: 5px;
     height: 5px;
-    border-radius: 50%;
-    background-color: rgba(255, 255, 255, 0.8);
+    animation: bubble-float 4s ease-in 6s infinite;
 }
 
-.bubble-content {
-    font-size: 14px;
-    display: inline-block;
+.b5 {
+    width: 7px;
+    height: 7px;
+    animation: bubble-float 5s ease-in 3s infinite;
+}
+
+/* Контейнеры для брызг */
+.splash-container {
+    position: absolute;
+    width: 40px;
+    height: 40px;
+    z-index: 3;
+    pointer-events: none;
+}
+
+.splash-left {
+    left: 30px;
+    top: 25px;
+    opacity: 0;
+    transform: scale(0);
+    animation: splash-appear-left 12s ease-out infinite;
+}
+
+.splash-right {
+    right: 30px;
+    top: 25px;
+    opacity: 0;
+    transform: scale(0);
+    animation: splash-appear-right 12s ease-out infinite;
+}
+
+/* Капли в брызгах */
+.splash-drop {
+    position: absolute;
+    background-color: rgba(173, 216, 230, 0.8);
+    border-radius: 50%;
+    transform-origin: center bottom;
+}
+
+.s1 {
+    width: 4px;
+    height: 12px;
+    left: 50%;
+    top: 0;
+    transform: translateX(-50%) rotate(-15deg);
+}
+
+.s2 {
+    width: 4px;
+    height: 10px;
+    left: 40%;
+    top: 5px;
+    transform: translateX(-50%) rotate(-30deg);
+}
+
+.s3 {
+    width: 4px;
+    height: 12px;
+    left: 60%;
+    top: 2px;
+    transform: translateX(-50%) rotate(15deg);
+}
+
+.s4 {
+    width: 3px;
+    height: 8px;
+    left: 30%;
+    top: 8px;
+    transform: translateX(-50%) rotate(-45deg);
+}
+
+.s5 {
+    width: 3px;
+    height: 8px;
+    left: 70%;
+    top: 6px;
+    transform: translateX(-50%) rotate(40deg);
+}
+
+.splash-circle {
+    position: absolute;
+    left: 50%;
+    top: 20px;
+    transform: translateX(-50%);
+    width: 24px;
+    height: 8px;
+    background: rgba(173, 216, 230, 0.5);
+    border-radius: 50%;
+}
+
+/* Анимации */
+@keyframes shark-path {
+    0% {
+        left: 0;
+        top: 60px;
+    }
+    20% {
+        left: 20px;
+        top: 55px;
+    }
+    23% {
+        left: 35px;
+        top: 25px;
+    }
+    26% {
+        left: 50px;
+        top: 55px;
+    }
+    40% {
+        left: 130px;
+        top: 60px;
+    }
+    45% {
+        left: 130px;
+        top: 60px;
+    }
+    70% {
+        left: 100px;
+        top: 55px;
+    }
+    73% {
+        left: 70px;
+        top: 25px;
+    }
+    76% {
+        left: 40px;
+        top: 55px;
+    }
+    95% {
+        left: 0;
+        top: 60px;
+    }
+    100% {
+        left: 0;
+        top: 60px;
+    }
+}
+
+@keyframes shark-flip {
+    0% {
+        transform: rotate(0) scaleX(1);
+    }
+    40% {
+        transform: rotate(0) scaleX(1);
+    }
+    45% {
+        transform: rotate(0) scaleX(-1);
+    }
+    95% {
+        transform: rotate(0) scaleX(-1);
+    }
+    100% {
+        transform: rotate(0) scaleX(1);
+    }
+}
+
+@keyframes splash-appear-left {
+    0%, 71%, 100% {
+        opacity: 0;
+        transform: scale(0);
+    }
+    72%, 74% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    78% {
+        opacity: 0;
+        transform: scale(0);
+    }
+}
+
+@keyframes splash-appear-right {
+    0%, 23%, 100% {
+        opacity: 0;
+        transform: scale(0);
+    }
+    24%, 26% {
+        opacity: 1;
+        transform: scale(1);
+    }
+    30% {
+        opacity: 0;
+        transform: scale(0);
+    }
 }
 
 @keyframes bubble-float {
-    0% { transform: translateY(0) rotate(0); }
-    25% { transform: translateY(-7px) rotate(5deg); }
-    50% { transform: translateY(-12px) rotate(0); }
-    75% { transform: translateY(-7px) rotate(-5deg); }
-    100% { transform: translateY(0) rotate(0); }
+    0% {
+        opacity: 0;
+        bottom: 20px;
+        left: 40px;
+    }
+    10% {
+        opacity: 0.7;
+    }
+    100% {
+        opacity: 0;
+        bottom: 80px;
+        left: 35px;
+    }
+}
+
+/* Стили при наведении */
+.shark-easter-egg:hover .shark {
+    filter: drop-shadow(0 0 5px rgba(52, 152, 219, 0.8));
+}
+
+.shark-easter-egg:hover .bubble {
+    animation-duration: 3s;
 }
 </style>
