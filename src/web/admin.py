@@ -1863,6 +1863,20 @@ def forbidden_handler(e):
     logger.warning(f"Запрещенный доступ: {request.path} с IP {request.remote_addr}")
     return render_template('403.html', error=str(e), user_role=session.get('user_role', 'viewer')), 403
 
+@app.route('/shark-hunter')
+@login_required
+@admin_required # <<<--- Этот декоратор разрешает доступ только админам
+def shark_hunter_game():
+    """Страница с игрой 'Охотник за сокровищами'."""
+    try:
+        user_role = session.get('user_role', 'viewer') # Все равно передаем для шаблона base.html
+        # Просто рендерим шаблон, вся логика игры на фронтенде
+        return render_template('shark_hunter.html', user_role=user_role)
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке страницы игры 'Охотник за сокровищами': {e}", exc_info=True)
+        flash(f"Произошла ошибка при загрузке игры: {e}", "danger")
+        return redirect(url_for('index'))
+
 
 def parse_args():
     """Разбор аргументов командной строки."""

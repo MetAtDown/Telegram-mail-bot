@@ -1,0 +1,385 @@
+{% extends "base.html" %}
+
+{% block title %}Акула-охотник{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* Основной контейнер игры */
+    #game-panel .panel-body#game-area {
+        padding: 0;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        overflow: hidden;
+        position: relative;
+        background-color: #0a1622;
+        border-radius: 0 0 4px 4px;
+        min-height: 500px;
+        box-shadow: inset 0 0 30px rgba(0,0,0,0.4);
+    }
+
+    /* Стиль для игрового холста - сделан во всю ширину */
+    #gameCanvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        cursor: none;
+        position: relative;
+        z-index: 1;
+    }
+
+    /* Экран загрузки */
+    #loading-screen {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(5, 12, 23, 0.9);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        z-index: 20;
+        color: #fff;
+        text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+    }
+
+    #loading-screen h2 {
+        font-size: 28px;
+        margin-bottom: 20px;
+        color: #3498db;
+    }
+
+    #loading-progress {
+        width: 70%;
+        max-width: 400px;
+        height: 20px;
+        background-color: rgba(255,255,255,0.1);
+        border-radius: 10px;
+        overflow: hidden;
+        position: relative;
+        margin-bottom: 15px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+    }
+
+    #loading-bar {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #3498db, #2ecc71);
+        transition: width 0.2s;
+        border-radius: 10px;
+    }
+
+    #loading-text {
+        font-size: 16px;
+        margin-top: 10px;
+        color: #ccc;
+    }
+
+    /* Игровой интерфейс - перемещен в верхнюю часть */
+    .game-stats-bar {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        pointer-events: none;
+        padding: 10px;
+        box-sizing: border-box;
+        z-index: 10;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background-color: rgba(0, 0, 0, 0.4);
+        backdrop-filter: blur(5px);
+        -webkit-backdrop-filter: blur(5px);
+    }
+
+    .stats-left, .stats-right {
+        display: flex;
+        gap: 20px;
+        align-items: center;
+    }
+
+    .stat-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: white;
+        font-weight: bold;
+        text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+        font-size: 18px;
+    }
+
+    #score-display {
+        color: #3498db;
+        font-size: 20px;
+    }
+
+    #combo-display {
+        color: #f1c40f;
+    }
+
+    #level-display {
+        color: #2ecc71;
+    }
+
+    #lives-display {
+        color: #e74c3c;
+    }
+
+    /* Индикатор активных способностей */
+    #powerup-indicator {
+        position: absolute;
+        bottom: 25px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        gap: 10px;
+        z-index: 3;
+        pointer-events: none;
+    }
+
+    .powerup-icon {
+        background-color: rgba(15, 25, 38, 0.85);
+        border-radius: 50%;
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+        border: 2px solid #3498db;
+        box-shadow: 0 0 15px rgba(52, 152, 219, 0.5);
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+
+    .powerup-icon img {
+        width: 24px;
+        height: 24px;
+    }
+
+    .powerup-icon.active {
+        opacity: 1;
+    }
+
+    .powerup-timer {
+        position: absolute;
+        bottom: -10px;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 35px;
+        height: 4px;
+        background-color: rgba(255,255,255,0.2);
+        border-radius: 2px;
+        overflow: hidden;
+    }
+
+    .powerup-timer-bar {
+        height: 100%;
+        width: 100%;
+        background-color: #3498db;
+        border-radius: 2px;
+    }
+
+    /* Анимация повышения уровня */
+    #level-up-animation {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        font-size: 46px;
+        color: #2ecc71;
+        font-weight: bold;
+        text-shadow: 0 0 15px rgba(46, 204, 113, 0.7);
+        opacity: 0;
+        z-index: 10;
+        pointer-events: none;
+        transition: all 0.5s ease-out;
+    }
+
+    .level-up-active {
+        animation: levelUpPulse 1.5s ease-out;
+    }
+
+    @keyframes levelUpPulse {
+        0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+        50% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
+        100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+    }
+
+    /* Контейнер для игровых сообщений */
+    #game-message-container {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        display: none;
+        justify-content: center;
+        align-items: center;
+        pointer-events: all;
+        z-index: 15;
+        padding: 20px;
+        box-sizing: border-box;
+        backdrop-filter: blur(3px);
+        -webkit-backdrop-filter: blur(3px);
+    }
+
+    #game-message {
+        background-color: rgba(10, 15, 25, 0.95);
+        color: #e74c3c;
+        padding: clamp(20px, 5vw, 35px) clamp(30px, 6vw, 50px);
+        border-radius: 10px;
+        font-size: clamp(20px, 4vw, 28px);
+        font-weight: bold;
+        text-align: center;
+        border: 2px solid #c0392b;
+        box-shadow: 0 5px 25px rgba(0,0,0,0.5);
+        pointer-events: auto;
+        max-width: 90%;
+        transform: translateY(0px);
+        animation: float 3s ease-in-out infinite;
+    }
+
+    @keyframes float {
+        0% { transform: translateY(0px); }
+        50% { transform: translateY(-10px); }
+        100% { transform: translateY(0px); }
+    }
+
+    #game-message small {
+        display: block;
+        font-size: clamp(14px, 2.5vw, 16px);
+        color: #bdc3c7;
+        margin-top: 15px;
+        font-weight: normal;
+    }
+
+    #game-message .stats {
+        font-size: 16px;
+        margin-top: 20px;
+        line-height: 1.6;
+        color: #ecf0f1;
+        text-align: left;
+    }
+
+    #game-message .stats span {
+        color: #3498db;
+        font-weight: bold;
+    }
+
+    /* Кнопка перезапуска */
+    #restart-button {
+        position: absolute;
+        bottom: 25px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: none;
+        z-index: 16;
+        pointer-events: auto;
+        cursor: pointer;
+        padding: 12px 24px;
+        font-size: 18px;
+        background-color: #2980b9;
+        border-color: #3498db;
+        transition: all 0.2s;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+    }
+
+    #restart-button:hover {
+        background-color: #3498db;
+        transform: translateX(-50%) translateY(-2px);
+        box-shadow: 0 6px 15px rgba(0,0,0,0.4);
+    }
+
+    /* Адаптивная высота игрового поля */
+    @media (min-width: 992px) {
+        #game-panel .panel-body#game-area {
+            min-height: 600px;
+        }
+    }
+
+    @media (min-width: 1200px) {
+        #game-panel .panel-body#game-area {
+            min-height: 700px;
+        }
+    }
+
+    /* Скрытые изображения для предзагрузки */
+    img.game-asset-loader {
+        display: none;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1>🦈 Deeray shark hunter</h1>
+<p class="hint-text">Управляй акулой с помощью мыши. Собирай сокровища (💎, ✨, ⚪) и избегай опасностей (🐡, ⚫, 🗑️).</p>
+
+<div class="panel" id="game-panel">
+    <div class="panel-header">Игровое поле</div>
+    <div class="panel-body" id="game-area">
+        <!-- Основной игровой холст -->
+        <canvas id="gameCanvas"></canvas>
+
+        <!-- Экран загрузки -->
+        <div id="loading-screen">
+            <h2>Загрузка игры</h2>
+            <div id="loading-progress">
+                <div id="loading-bar"></div>
+            </div>
+            <div id="loading-text">Загрузка ресурсов...</div>
+        </div>
+
+        <!-- Новая панель статистики вверху -->
+        <div class="game-stats-bar">
+            <div class="stats-left">
+                <div id="score-display" class="stat-item">Очки: 0</div>
+                <div id="combo-display" class="stat-item">Комбо: x1</div>
+            </div>
+            <div class="stats-right">
+                <div id="level-display" class="stat-item">Уровень: 1</div>
+                <div id="lives-display" class="stat-item">Жизни: 3</div>
+            </div>
+        </div>
+
+        <!-- Индикатор способностей -->
+        <div id="powerup-indicator"></div>
+
+        <!-- Анимация повышения уровня -->
+        <div id="level-up-animation">НОВЫЙ УРОВЕНЬ!</div>
+
+        <!-- Контейнер для сообщений -->
+        <div id="game-message-container">
+            <div id="game-message">Сообщение</div>
+        </div>
+
+        <!-- Кнопка перезапуска -->
+        <button id="restart-button" class="btn btn-primary btn-lg">Играть снова</button>
+    </div>
+</div>
+
+<!-- Предзагрузка ресурсов -->
+<img src="{{ url_for('static', filename='img/shark_player.png') }}" class="game-asset-loader" id="img-shark">
+<img src="{{ url_for('static', filename='img/coin.png') }}" class="game-asset-loader" id="img-coin">
+<img src="{{ url_for('static', filename='img/pearl.png') }}" class="game-asset-loader" id="img-pearl">
+<img src="{{ url_for('static', filename='img/shell.png') }}" class="game-asset-loader" id="img-shell">
+<img src="{{ url_for('static', filename='img/pufferfish.png') }}" class="game-asset-loader" id="img-pufferfish">
+<img src="{{ url_for('static', filename='img/urchin.png') }}" class="game-asset-loader" id="img-urchin">
+<img src="{{ url_for('static', filename='img/trash.png') }}" class="game-asset-loader" id="img-trash">
+<img src="{{ url_for('static', filename='img/treasure_chest.png') }}" class="game-asset-loader" id="img-chest">
+<img src="{{ url_for('static', filename='img/underwater_bg_1.jpg') }}" class="game-asset-loader" id="img-background1">
+<img src="{{ url_for('static', filename='img/underwater_bg_2.jpg') }}" class="game-asset-loader" id="img-background2">
+<img src="{{ url_for('static', filename='img/underwater_bg_3.jpg') }}" class="game-asset-loader" id="img-background3">
+<img src="{{ url_for('static', filename='img/underwater_bg_4.jpg') }}" class="game-asset-loader" id="img-background4">
+<img src="{{ url_for('static', filename='img/magnet.png') }}" class="game-asset-loader" id="img-magnet">
+<img src="{{ url_for('static', filename='img/shield.png') }}" class="game-asset-loader" id="img-shield">
+<img src="{{ url_for('static', filename='img/star.png') }}" class="game-asset-loader" id="img-star">
+
+{% endblock %}
+
+{% block extra_js %}
+<script src="{{ url_for('static', filename='js/shark_hunter_ru.js') }}"></script>
+{% endblock %}

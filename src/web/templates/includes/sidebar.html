@@ -27,4 +27,68 @@
             <a href="{{ url_for('help') }}">Справка</a>
         </li>
     </ul>
+    
+    {% if session.get('user_role') == 'admin' %}
+    <!-- Пасхалка в виде плавающего пузырька -->
+    <div class="bubble-easter-egg">
+        <a href="{{ url_for('shark_hunter_game') }}" title="Подводная игра">
+            <div class="bubble">
+                <span class="bubble-content">💎</span>
+            </div>
+        </a>
+    </div>
+    {% endif %}
 </div>
+
+<style>
+.bubble-easter-egg {
+    position: absolute;
+    bottom: 80px;
+    left: 90px;
+    z-index: 999;
+}
+
+.bubble {
+    width: 30px;
+    height: 30px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.8), rgba(52, 152, 219, 0.3));
+    box-shadow: 0 0 10px rgba(52, 152, 219, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    opacity: 0.6;
+    transition: opacity 0.3s, transform 0.3s;
+    animation: bubble-float 5s ease-in-out infinite;
+}
+
+.bubble:hover {
+    opacity: 1;
+    transform: scale(1.2);
+}
+
+.bubble::after {
+    content: '';
+    position: absolute;
+    top: 7px;
+    left: 7px;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background-color: rgba(255, 255, 255, 0.8);
+}
+
+.bubble-content {
+    font-size: 14px;
+    display: inline-block;
+}
+
+@keyframes bubble-float {
+    0% { transform: translateY(0) rotate(0); }
+    25% { transform: translateY(-7px) rotate(5deg); }
+    50% { transform: translateY(-12px) rotate(0); }
+    75% { transform: translateY(-7px) rotate(-5deg); }
+    100% { transform: translateY(0) rotate(0); }
+}
+</style>
