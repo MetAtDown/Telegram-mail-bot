@@ -813,14 +813,12 @@ document.addEventListener('DOMContentLoaded', () => {
             gameMessage.innerHTML = `
                 <div style="color: #3498db; font-size: 32px; margin-bottom: 20px;">Deeray Shark Hunter</div>
                 <div style="color: #ecf0f1; font-size: 18px; margin-bottom: 15px;">
-                    Собирайте сокровища и избегайте препятствий.
-                    <br>Повышайте уровень для новых испытаний!
+                    Собирай сокровища и избегай препятствий!
                 </div>
                 <small>Нажмите, чтобы начать...</small>
             `;
             gameMessageContainer.style.display = 'flex';
 
-            // ВАЖНОЕ ИСПРАВЛЕНИЕ: Устанавливаем обработчик клика напрямую, а не через onclick
             const startGameHandler = function() {
                 startGame();
                 gameMessageContainer.removeEventListener('click', startGameHandler);
