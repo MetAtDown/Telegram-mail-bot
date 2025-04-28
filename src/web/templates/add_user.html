@@ -29,7 +29,7 @@
             <div class="alert alert-warning">
                 <strong>Внимание:</strong> Пользователь или группа с Chat ID <strong>{{ chat_id }}</strong> уже существует в системе.
                 <br>
-                Если вы продолжите, его статус (включены/отключены уведомления) будет обновлен, и указанные ниже темы будут добавлены к его существующим подпискам. Существующие темы не будут удалены.
+                Если вы продолжите, его статус и заметки будут обновлены, а указанные ниже темы будут добавлены к его существующим подпискам. Существующие темы не будут удалены.
             </div>
             {# Форма для подтверждения перезаписи #}
             <form method="post" action="{{ url_for('add_user') }}" id="confirm-overwrite-form">
@@ -41,6 +41,8 @@
                 <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
                 {# Используем |default('') чтобы избежать ошибки, если subjects не переданы #}
                 <input type="hidden" name="subjects" value="{{ subjects|default('') }}">
+                <!-- <<<<<<< НОВОЕ СКРЫТОЕ ПОЛЕ >>>>>>> -->
+                <input type="hidden" name="notes" value="{{ notes|default('') }}">
 
                 {# Флаг подтверждения перезаписи #}
                 <input type="hidden" name="confirm_overwrite" value="true">
@@ -71,6 +73,8 @@
                 <input type="hidden" name="chat_id" value="{{ chat_id }}">
                 <input type="hidden" name="status" value="{{ 'enable' if status == 'Enable' else 'disable' }}">
                 <input type="hidden" name="subjects" value="{{ subjects|default('') }}">
+                <!-- <<<<<<< НОВОЕ СКРЫТОЕ ПОЛЕ >>>>>>> -->
+                <input type="hidden" name="notes" value="{{ notes|default('') }}">
 
                 {# Флаг подтверждения дубликатов #}
                 <input type="hidden" name="confirm_duplicate_subjects" value="true">
@@ -105,17 +109,17 @@
 
                 {# Выбор статуса уведомлений #}
                 <div class="form-group">
-                    <label class="form-label">Статус уведомлений</label>
+                    <label class="form-label" id="status-label">Статус уведомлений</label>
                     <div class="radio-group" role="radiogroup" aria-labelledby="status-label">
                         {# Радио-кнопка "Включены" (по умолчанию) #}
                         <label class="radio-label radio-active"> {# Начальный класс для активного #}
-                            <input type="radio" name="status" value="enable" checked style="display: none;" aria-label="Уведомления включены">
+                            <input type="radio" name="status" value="enable" {% if status|default('Enable') == 'Enable' %}checked{% endif %} style="display: none;" aria-label="Уведомления включены">
                             <span class="radio-custom" aria-hidden="true"></span> {# Декоративный элемент #}
                             Включены
                         </label>
                         {# Радио-кнопка "Отключены" #}
                         <label class="radio-label">
-                            <input type="radio" name="status" value="disable" style="display: none;" aria-label="Уведомления отключены">
+                            <input type="radio" name="status" value="disable" {% if status == 'Disable' %}checked{% endif %} style="display: none;" aria-label="Уведомления отключены">
                             <span class="radio-custom" aria-hidden="true"></span> {# Декоративный элемент #}
                             Отключены
                         </label>
@@ -138,6 +142,18 @@
                     </div>
                 </div>
 
+
+                <div class="form-group">
+                    <label for="notes_textarea" class="form-label">Заметки (необязательно)</label>
+                    <textarea id="notes_textarea" name="notes" class="form-control" rows="4"
+                              placeholder="Любая дополнительная информация: имя клиента, отдел, контактное лицо и т.д.">{{ notes|default('') }}</textarea>
+                    <div class="hint-text">
+                        Это поле для ваших внутренних комментариев, оно нигде не отображается пользователю.
+                    </div>
+                </div>
+
+
+
                 {# Кнопка отправки формы #}
                 <div class="buttons-container mt-3">
                     <button type="submit" class="btn btn-primary">Добавить пользователя/группу</button>
@@ -150,7 +166,5 @@
 {% endblock %}
 
 {% block scripts %}
-{# Если для радио-кнопок или других элементов нужен JS, он должен быть подключен в base.html или здесь #}
-{# <script src="{{ url_for('static', filename='js/add_user_specific.js') }}"></script> #}
-{# Предполагаем, что основной JS для стилизации радио-кнопок уже есть в main.js #}
+{# Скрипты для радио-кнопок должны быть в main.js или base.html #}
 {% endblock %}

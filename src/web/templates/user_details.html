@@ -11,40 +11,64 @@
         </a>
     </div>
 
-    <div class="user-controls">
-        <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#addSubjectModal">Добавить тему</button>
-        
-        <form method="post" action="{{ url_for('toggle_user_status', chat_id=user.chat_id) }}" style="display:inline;">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            {% if user.is_enabled %}
-            <button type="submit" class="btn btn-warning">Отключить уведомления</button>
-            {% else %}
-            <button type="submit" class="btn btn-warning">Включить уведомления</button>
-            {% endif %}
-        </form>
-        
-        <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <button type="submit" class="btn btn-danger">Удалить пользователя</button>
-        </form>
-        
-        <div class="user-status {% if user.is_enabled %}active{% else %}inactive{% endif %}">{{ user.status }}</div>
-    </div>
+    <div class="user-info-panel panel">
+        <div class="panel-header">
+            <div class="user-id-header">Пользователь ID: {{ user.chat_id }}</div>
+            <div class="user-status {% if user.is_enabled %}active{% else %}inactive{% endif %}">{{ user.status }}</div>
+        </div>
+        <div class="panel-body">
+            <div class="user-controls">
+                <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#addSubjectModal">Добавить тему</button>
+                <button type="button" class="btn btn-info" data-toggle="modal" data-target="#bulkAddSubjectModal">Массовое добавление тем</button>
+                <!-- <<<<<<< НОВАЯ КНОПКА >>>>>>> -->
+                <button type="button" class="btn btn-secondary" data-toggle="modal" data-target="#editNotesModal">Редактировать заметки</button>
+                <!-- <<<<<<< КОНЕЦ НОВОЙ КНОПКИ >>>>>>> -->
 
-    <div class="search-container">
-        <input type="text" class="search-input" placeholder="Поиск по темам..." value="{{ request.args.get('search', '') }}">
-        <div class="search-controls">
-            <button type="button" class="btn search-btn">Поиск</button>
-            <button type="button" class="btn clear-btn">Очистить</button>
-            <div class="results-counter">Найдено: {{ user.subjects|length }}</div>
+                <form method="post" action="{{ url_for('toggle_user_status', chat_id=user.chat_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    {% if user.is_enabled %}
+                    <button type="submit" class="btn btn-warning">Отключить уведомления</button>
+                    {% else %}
+                    <button type="submit" class="btn btn-warning">Включить уведомления</button>
+                    {% endif %}
+                </form>
+
+                <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-danger">Удалить пользователя</button>
+                </form>
+            </div>
+
+            <!-- <<<<<<< НОВЫЙ БЛОК ДЛЯ ОТОБРАЖЕНИЯ ЗАМЕТОК >>>>>>> -->
+            <div class="notes-section">
+                <h4>Заметки:</h4>
+                {% if user.notes %}
+                    <pre class="notes-content">{{ user.notes }}</pre>
+                {% else %}
+                    <p class="no-notes">Заметок нет.</p>
+                {% endif %}
+            </div>
+            <!-- <<<<<<< КОНЕЦ НОВОГО БЛОКА >>>>>>> -->
+
         </div>
     </div>
 
+
     <div class="panel">
-        <div class="panel-header user-id-header">Пользователь ID: {{ user.chat_id }}</div>
+        <div class="panel-header">
+            Темы подписок
+            <div class="search-container">
+                 <input type="text" class="search-input" id="subject-search" placeholder="Поиск по темам..." value="{{ request.args.get('search', '') }}">
+                 <div class="search-controls">
+                     <button type="button" class="btn search-btn" id="search-button">Поиск</button>
+                     <button type="button" class="btn clear-btn" id="clear-search-button">Очистить</button>
+                     <div class="results-counter" id="results-count">Найдено: {{ user.subjects|length }}</div>
+                 </div>
+             </div>
+        </div>
         <div class="panel-body">
             {% if user.subjects %}
-            <table class="themes-table">
+            <table class="themes-table" id="themes-table">
                 <thead>
                     <tr>
                         <th>#</th>
@@ -54,11 +78,11 @@
                 </thead>
                 <tbody>
                     {% for subject in user.subjects %}
-                    <tr>
+                    <tr class="subject-row">
                         <td>{{ loop.index }}</td>
-                        <td>{{ subject }}</td>
+                        <td class="subject-name">{{ subject }}</td>
                         <td class="actions-cell">
-                            <button type="button" class="btn btn-warning edit-btn" onclick="editSubject('{{ subject }}')">Редактировать</button>
+                            <button type="button" class="btn btn-warning edit-btn" data-toggle="modal" data-target="#editSubjectModal" data-subject="{{ subject }}">Редактировать</button>
                             <form method="post" action="{{ url_for('delete_subject', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить тему \'{{ subject }}\'?');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                 <input type="hidden" name="subject" value="{{ subject }}">
@@ -66,26 +90,16 @@
                             </form>
                         </td>
                     </tr>
+                    {% else %} {# Добавлено: сообщение, если поиск не дал результатов #}
+                    <tr class="no-results-row" style="display: none;">
+                         <td colspan="3" class="text-center">По вашему запросу тем не найдено.</td>
+                    </tr>
                     {% endfor %}
                 </tbody>
             </table>
-            {% else %}
-            <p class="text-center">У пользователя нет тем</p>
-            {% endif %}
-        </div>
-    </div>
-
-    <div class="panel">
-        <div class="panel-header">Массовое добавление тем</div>
-        <div class="panel-body">
-            <form method="post" action="{{ url_for('add_subjects_bulk', chat_id=user.chat_id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <div class="form-group">
-                    <label class="form-label">Список тем (каждая с новой строки)</label>
-                    <textarea name="subjects_bulk" class="form-control" rows="6"></textarea>
-                </div>
-                <button type="submit" class="btn btn-primary">Добавить темы</button>
-            </form>
+             {% else %}
+                 <p class="text-center">У пользователя нет тем</p>
+             {% endif %}
         </div>
     </div>
 
@@ -95,7 +109,7 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h2>Добавление темы</h2>
-                    <button type="button" class="close" data-dismiss="modal">&times;</button>
+                    <button type="button" class="close" data-dismiss="modal">×</button>
                 </div>
                 <div class="modal-body">
                     <form method="post" action="{{ url_for('add_subject', chat_id=user.chat_id) }}">
@@ -117,14 +131,18 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h2>Редактирование темы</h2>
-                    <button type="button" class="close" data-dismiss="modal">&times;</button>
+                    <button type="button" class="close" data-dismiss="modal">×</button>
                 </div>
                 <div class="modal-body">
                     <form method="post" action="{{ url_for('edit_subject', chat_id=user.chat_id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <input type="hidden" name="old_subject" id="oldSubject">
                         <div class="form-group">
-                            <label class="form-label">Новое название темы</label>
+                            <label class="form-label">Старая тема:</label>
+                            <p id="oldSubjectDisplay"></p>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="newSubject">Новое название темы</label>
                             <input type="text" name="new_subject" id="newSubject" class="form-control" required>
                         </div>
                         <button type="submit" class="btn btn-warning">Сохранить</button>
@@ -134,9 +152,141 @@
         </div>
     </div>
 
-    <!-- Скрытая форма для серверного поиска -->
-    <form action="{{ url_for('user_details', chat_id=user.chat_id) }}" method="get" id="server-search-form" style="display:none;">
+    <!-- Модальное окно для массового добавления тем -->
+    <div class="modal" id="bulkAddSubjectModal">
+         <div class="modal-dialog">
+             <div class="modal-content">
+                 <div class="modal-header">
+                     <h2>Массовое добавление тем</h2>
+                     <button type="button" class="close" data-dismiss="modal">×</button>
+                 </div>
+                 <div class="modal-body">
+                     <form method="post" action="{{ url_for('add_subjects_bulk', chat_id=user.chat_id) }}">
+                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                         <div class="form-group">
+                             <label class="form-label" for="subjects_bulk_textarea">Список тем (каждая с новой строки)</label>
+                             <textarea id="subjects_bulk_textarea" name="subjects_bulk" class="form-control" rows="10"></textarea>
+                         </div>
+                         <button type="submit" class="btn btn-primary">Добавить темы</button>
+                     </form>
+                 </div>
+             </div>
+         </div>
+     </div>
+
+    <!-- <<<<<<< НОВОЕ МОДАЛЬНОЕ ОКНО >>>>>>> -->
+    <div class="modal" id="editNotesModal">
+        <div class="modal-dialog modal-lg"> <!-- Можно сделать пошире -->
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Редактирование заметок</h2>
+                    <button type="button" class="close" data-dismiss="modal">×</button>
+                </div>
+                <div class="modal-body">
+                    <form method="post" action="{{ url_for('update_user_notes', chat_id=user.chat_id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <div class="form-group">
+                            <label class="form-label" for="notesTextarea">Текст заметки</label>
+                            <textarea name="notes" id="notesTextarea" class="form-control" rows="8">{{ user.notes|default('') }}</textarea>
+                             <div class="hint-text">Введите или отредактируйте заметку для этого пользователя/группы.</div>
+                        </div>
+                        <button type="submit" class="btn btn-secondary">Сохранить заметки</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- <<<<<<< КОНЕЦ НОВОГО МОДАЛЬНОГО ОКНА >>>>>>> -->
+
+    <!-- Скрытая форма для серверного поиска НЕ НУЖНА, поиск будет через JS -->
+    <!-- <form action="{{ url_for('user_details', chat_id=user.chat_id) }}" method="get" id="server-search-form" style="display:none;">
         <input type="hidden" name="search" id="server-search-input" value="{{ request.args.get('search', '') }}">
-    </form>
+    </form> -->
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // --- Логика для модального окна редактирования темы ---
+    const editSubjectModal = document.getElementById('editSubjectModal');
+    if (editSubjectModal) {
+        // Используем делегирование событий для кнопок редактирования
+        document.querySelector('.themes-table tbody')?.addEventListener('click', function(event) {
+            if (event.target.classList.contains('edit-btn')) {
+                const button = event.target;
+                const oldSubject = button.getAttribute('data-subject');
+                const oldSubjectField = editSubjectModal.querySelector('#oldSubject');
+                const oldSubjectDisplay = editSubjectModal.querySelector('#oldSubjectDisplay');
+                const newSubjectField = editSubjectModal.querySelector('#newSubject');
+
+                if (oldSubjectField && oldSubjectDisplay && newSubjectField) {
+                    oldSubjectField.value = oldSubject;
+                    oldSubjectDisplay.textContent = oldSubject; // Отображаем старую тему
+                    newSubjectField.value = oldSubject; // Предзаполняем новой темой старую
+                    // newSubjectField.focus(); // Можно раскомментировать для фокуса
+                }
+            }
+        });
+
+        // Закрытие модалки
+        editSubjectModal.querySelector('.close')?.addEventListener('click', () => {
+            // Логика закрытия, если нужна
+        });
+        editSubjectModal.querySelector('[data-dismiss="modal"]')?.addEventListener('click', () => {
+            // Логика закрытия, если нужна
+        });
+    }
+
+    // --- Логика для поиска тем на стороне клиента ---
+    const searchInput = document.getElementById('subject-search');
+    const searchButton = document.getElementById('search-button');
+    const clearButton = document.getElementById('clear-search-button');
+    const tableBody = document.getElementById('themes-table')?.querySelector('tbody');
+    const resultsCount = document.getElementById('results-count');
+    const noResultsRow = document.querySelector('.no-results-row');
+
+    function filterSubjects() {
+        const query = searchInput.value.toLowerCase().trim();
+        let visibleCount = 0;
+        const rows = tableBody?.querySelectorAll('tr.subject-row'); // Выбираем только строки с темами
+
+        rows?.forEach(row => {
+            const subjectName = row.querySelector('.subject-name')?.textContent.toLowerCase();
+            if (subjectName && subjectName.includes(query)) {
+                row.style.display = ''; // Показываем строку
+                visibleCount++;
+            } else {
+                row.style.display = 'none'; // Скрываем строку
+            }
+        });
+
+        // Обновляем счетчик
+        if (resultsCount) {
+            resultsCount.textContent = `Найдено: ${visibleCount}`;
+        }
+
+        // Показываем/скрываем сообщение "не найдено"
+        if (noResultsRow) {
+            noResultsRow.style.display = (visibleCount === 0 && rows && rows.length > 0) ? '' : 'none';
+        }
+    }
+
+    searchButton?.addEventListener('click', filterSubjects);
+    clearButton?.addEventListener('click', () => {
+        searchInput.value = '';
+        filterSubjects(); // Применяем пустой фильтр, чтобы показать все
+    });
+    // Фильтрация при вводе
+    searchInput?.addEventListener('input', filterSubjects);
+
+    // Применяем фильтр при загрузке страницы, если в поле поиска что-то есть
+    if (searchInput?.value) {
+        filterSubjects();
+    }
+
+    // --- Логика для модальных окон (открытие/закрытие) ---
+    // Уже должна быть в main.js или base.html
+});
+</script>
 {% endblock %}

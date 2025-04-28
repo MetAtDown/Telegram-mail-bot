@@ -687,16 +687,20 @@ def user_details(chat_id: str):
         def get_user_data():
             is_enabled = db_manager.get_user_status(chat_id)
             subjects = db_manager.get_user_subjects(chat_id)
+            notes = db_manager.get_user_notes(chat_id)
 
             return {
                 'is_enabled': is_enabled,
-                'subjects': subjects
+                'subjects': subjects,
+                'notes': notes
             }
 
+        # Ключ кэша теперь включает заметки
         user_data_cache = get_cached_data(f'user_data_{chat_id}', get_user_data, ttl=60)
 
         is_enabled = user_data_cache['is_enabled']
         subjects = user_data_cache['subjects']
+        notes = user_data_cache['notes']
 
         # Добавить поиск по темам
         search_query = request.args.get('search', '')
@@ -707,7 +711,8 @@ def user_details(chat_id: str):
             'chat_id': chat_id,
             'status': 'Активен' if is_enabled else 'Отключен',
             'is_enabled': is_enabled,
-            'subjects': subjects
+            'subjects': subjects,
+            'notes': notes # <<< Передаем заметки в данные для шаблона
         }
 
         # Получаем роль пользователя для отображения доступных действий
@@ -718,6 +723,7 @@ def user_details(chat_id: str):
         logger.error(f"Ошибка при загрузке деталей пользователя {chat_id}: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('users'))
+
 
 
 @app.route('/user/<chat_id>/toggle-status', methods=['POST'])
@@ -1013,6 +1019,41 @@ def delete_user(chat_id: str):
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('users'))
 
+@app.route('/user/<chat_id>/update-notes', methods=['POST'])
+@login_required
+@operator_required # Разрешаем операторам и админам редактировать заметки
+@limiter.limit("50 per minute") # Ограничиваем частоту запросов
+def update_user_notes(chat_id: str):
+    """
+    Обновление заметок пользователя.
+
+    Args:
+        chat_id: ID чата пользователя
+    """
+    try:
+        notes = request.form.get('notes', '').strip()
+
+        if db_manager.update_user_notes(chat_id, notes):
+            flash(f"Заметки для пользователя {chat_id} успешно обновлены", "success")
+            logger.info(f"Обновлены заметки для пользователя {chat_id}")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], f"update_user_notes",
+                             request.remote_addr, f"chat_id={chat_id}")
+
+            # Полная инвалидация кэша после изменения данных
+            invalidate_all_caches()
+        else:
+            flash(f"Не удалось обновить заметки для пользователя {chat_id}", "danger")
+            logger.warning(f"Не удалось обновить заметки для пользователя {chat_id}")
+
+        return redirect(url_for('user_details', chat_id=chat_id))
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении заметок пользователя {chat_id}: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('user_details', chat_id=chat_id))
+
 
 @app.route('/login', methods=['GET', 'POST'])
 @limiter.limit("20 per hour")
@@ -1212,18 +1253,24 @@ def add_user():
             chat_id = request.form.get('chat_id', '').strip()
             status = 'Enable' if request.form.get('status') == 'enable' else 'Disable'
             subjects_text = request.form.get('subjects', '').strip()
+            notes = request.form.get('notes', '').strip() # <<< Получаем заметки из формы
             confirm_overwrite = request.form.get('confirm_overwrite') == 'true'
             confirm_duplicate_subjects = request.form.get('confirm_duplicate_subjects') == 'true'
 
             # Проверка chat_id
             if not chat_id:
                 flash("Chat ID не может быть пустым", "warning")
-                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
+                # Передаем введенные данные обратно в форму
+                return render_template('add_user.html',
+                                       chat_id=chat_id, status=status, subjects=subjects_text, notes=notes,
+                                       user_role=session.get('user_role', 'viewer'))
 
-            # Проверка, что chat_id является целым числом (положительным или отрицательным)
+            # Проверка, что chat_id является целым числом
             if not re.match(r'^-?\d+$', chat_id):
                 flash("Chat ID должен быть целым числом (может начинаться с - для групп)", "warning")
-                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
+                return render_template('add_user.html',
+                                       chat_id=chat_id, status=status, subjects=subjects_text, notes=notes,
+                                       user_role=session.get('user_role', 'viewer'))
 
             # Проверка существования пользователя
             user_exists = db_manager.is_user_registered(chat_id)
@@ -1238,13 +1285,14 @@ def add_user():
             if subjects:
                 duplicate_subjects = check_duplicate_subjects(subjects, chat_id if user_exists else None)
 
-            # Если пользователь существует и нет подтверждения, возвращаем форму подтверждения
+            # Если пользователь существует и нет подтверждения перезаписи, возвращаем форму подтверждения
             if user_exists and not confirm_overwrite:
                 return render_template('add_user.html',
                                        user_exists=True,
                                        chat_id=chat_id,
                                        status=status,
                                        subjects=subjects_text,
+                                       notes=notes, # <<< Передаем заметки в шаблон подтверждения
                                        user_role=session.get('user_role', 'viewer'))
 
             # Если есть дубликаты тем и нет подтверждения, возвращаем форму подтверждения
@@ -1255,12 +1303,14 @@ def add_user():
                                        chat_id=chat_id,
                                        status=status,
                                        subjects=subjects_text,
+                                       notes=notes, # <<< Передаем заметки в шаблон подтверждения
                                        duplicate_subjects=True,
                                        user_role=session.get('user_role', 'viewer'))
 
             # Добавление/обновление пользователя
-            logger.info(f"Отправка запроса на добавление пользователя {chat_id} в БД")
-            result = db_manager.add_user(chat_id, status) # Режим доставки будет по умолчанию
+            logger.info(f"Отправка запроса на добавление/обновление пользователя {chat_id} с заметками ({len(notes)} символов)")
+            # Передаем заметки в db_manager
+            result = db_manager.add_user(chat_id, status, notes=notes) # Режим доставки будет по умолчанию
 
             if result:
                 action = "обновлен" if user_exists else "добавлен"
@@ -1292,14 +1342,21 @@ def add_user():
 
                 return redirect(url_for('user_details', chat_id=chat_id))
             else:
-                logger.error(f"Не удалось добавить пользователя {chat_id} в БД")
-                flash(f"Не удалось добавить пользователя {chat_id}. Проверьте логи.", "danger")
-                return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
+                logger.error(f"Не удалось добавить/обновить пользователя {chat_id}")
+                flash(f"Не удалось добавить/обновить пользователя {chat_id}. Проверьте логи.", "danger")
+                # Возвращаем данные в форму
+                return render_template('add_user.html',
+                                       chat_id=chat_id, status=status, subjects=subjects_text, notes=notes,
+                                       user_role=session.get('user_role', 'viewer'))
 
         except Exception as e:
-            logger.error(f"Ошибка при добавлении нового пользователя: {e}", exc_info=True)
+            logger.error(f"Ошибка при добавлении/обновлении нового пользователя: {e}", exc_info=True)
             flash(f"Произошла ошибка: {e}", "danger")
-            return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
+            # Возвращаем данные в форму
+            return render_template('add_user.html',
+                                   chat_id=request.form.get('chat_id',''), status=request.form.get('status','enable'),
+                                   subjects=request.form.get('subjects',''), notes=request.form.get('notes',''),
+                                   user_role=session.get('user_role', 'viewer'))
 
     # Для GET запроса
     return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))

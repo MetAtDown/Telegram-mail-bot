@@ -10,6 +10,7 @@ import traceback
 
 from src.utils.logger import get_logger
 from src.config import settings
+from src.utils.cache_manager import is_cache_valid, invalidate_caches
 
 # Настройка логирования
 logger = get_logger("db_manager")
@@ -358,6 +359,7 @@ class DatabaseManager:
                     chat_id TEXT PRIMARY KEY,
                     status TEXT DEFAULT 'Enable' NOT NULL CHECK (status IN ('Enable', 'Disable')),
                     delivery_mode TEXT DEFAULT '{DEFAULT_DELIVERY_MODE}' NOT NULL CHECK (delivery_mode IN ('{DELIVERY_MODE_TEXT}', '{DELIVERY_MODE_HTML}', '{DELIVERY_MODE_SMART}')),
+                    notes TEXT DEFAULT '',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -390,24 +392,6 @@ class DatabaseManager:
 
 
                 cursor.execute("PRAGMA table_info(users)")
-                columns = [col['name'] for col in cursor.fetchall()]
-                if 'delivery_mode' not in columns:
-                    logger.warning("Столбец 'delivery_mode' отсутствует в таблице users. Добавляем...")
-                    try:
-                        conn.execute('BEGIN IMMEDIATE')
-                        cursor.execute(f'''
-                            ALTER TABLE users
-                            ADD COLUMN delivery_mode TEXT DEFAULT '{DEFAULT_DELIVERY_MODE}' NOT NULL CHECK (delivery_mode IN ('{DELIVERY_MODE_TEXT}', '{DELIVERY_MODE_HTML}', '{DELIVERY_MODE_SMART}'))
-                        ''')
-                        conn.commit()
-                        logger.info("Столбец 'delivery_mode' успешно добавлен в таблицу users.")
-                        self._clear_cache()
-                        self.release_connection()
-                    except Exception as alter_err:
-                        conn.rollback()
-                        logger.error(
-                            f"Не удалось добавить столбец 'delivery_mode': {alter_err}. Возможно, потребуется ручное вмешательство.")
-                        raise RuntimeError(f"Не удалось обновить схему БД: {alter_err}") from alter_err
 
         except Exception as e:
             logger.error(f"Ошибка при инициализации базы данных: {e}")
@@ -429,9 +413,6 @@ class DatabaseManager:
 
     def _get_from_cache(self, key):
         """Получает данные из кэша, если они еще действительны."""
-        # Import at the top of the file
-        from src.utils.cache_manager import is_cache_valid
-
         with self.cache_lock:
             if key in self.cache:
                 data, timestamp = self.cache[key]
@@ -544,9 +525,6 @@ class DatabaseManager:
 
     def refresh_data(self):
         """Принудительное обновление всех кэшированных данных и сброс соединений."""
-        # Import at the top of the file
-        from src.utils.cache_manager import invalidate_caches
-
         logger.info("Выполняется принудительное обновление данных и сброс соединений")
         self._clear_cache()
 
@@ -795,7 +773,82 @@ class DatabaseManager:
             logger.error(f"Ошибка при обновлении статуса пользователя {chat_id}: {e}")
             return False
 
-    def add_user(self, chat_id: str, status: str = 'Enable', delivery_mode: str = DEFAULT_DELIVERY_MODE) -> bool:
+    def get_user_notes(self, chat_id: str) -> str:
+        """
+        Получение заметок для пользователя.
+
+        Args:
+            chat_id: ID чата пользователя
+
+        Returns:
+            Текст заметок или пустая строка.
+        """
+        cache_key = f"user_notes_{chat_id}"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                query = 'SELECT notes FROM users WHERE chat_id = ?'
+                cursor.execute(query, (chat_id,))
+                result = cursor.fetchone()
+
+                notes = result['notes'] if result and result['notes'] else ''
+                logger.debug(f"Заметки для пользователя {chat_id}: {len(notes)} символов")
+
+                self._set_in_cache(cache_key, notes)
+                return notes
+        except Exception as e:
+            logger.error(f"Ошибка при получении заметок для пользователя {chat_id}: {e}")
+            return ''  # Возвращаем пустую строку при ошибке
+
+
+    def update_user_notes(self, chat_id: str, notes: str) -> bool:
+        """
+        Обновление заметок для пользователя.
+
+        Args:
+            chat_id: ID чата пользователя
+            notes: Новый текст заметок
+
+        Returns:
+            True если заметки обновлены успешно, иначе False
+        """
+        try:
+            # Очищаем заметки перед сохранением
+            cleaned_notes = notes.strip() if notes else ''
+
+            with self.get_connection() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                cursor = conn.cursor()
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                query = 'UPDATE users SET notes = ?, updated_at = ? WHERE chat_id = ?'
+                cursor.execute(query, (cleaned_notes, now, chat_id))
+                rows_affected = cursor.rowcount
+                conn.commit()
+
+                success = rows_affected > 0
+                logger.info(
+                    f"Обновление заметок пользователя {chat_id}: успех: {success}, затронуто строк: {rows_affected}, длина заметки: {len(cleaned_notes)}")
+
+                if success:
+                    # Очищаем кэш для этого пользователя
+                    self._clear_cache(f"user_notes_{chat_id}")
+                    # Очищаем и другие кэши, которые могли бы зависеть от данных пользователя, если бы notes там использовались
+                    # self._clear_cache("all_users") # Не требуется, если notes не кэшируются в all_users
+
+                return success
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении заметок пользователя {chat_id}: {e}")
+            try:
+                conn.rollback()
+            except Exception as rb_err:
+                logger.error(f"Ошибка при откате транзакции: {rb_err}")
+            return False
+
+    def add_user(self, chat_id: str, status: str = 'Enable', delivery_mode: str = DEFAULT_DELIVERY_MODE, notes: str = '') -> bool:
         """
         Добавление нового пользователя или обновление существующего.
 
@@ -803,6 +856,7 @@ class DatabaseManager:
             chat_id: ID чата пользователя
             status: Статус пользователя ('Enable' или 'Disable')
             delivery_mode: Режим доставки ('text', 'html', 'smart')
+            notes: Текстовые заметки (опционально)
 
         Returns:
             True если пользователь добавлен/обновлен успешно, иначе False
@@ -815,24 +869,25 @@ class DatabaseManager:
                 f"Неверный режим доставки '{delivery_mode}' при добавлении пользователя {chat_id}. Используется '{DEFAULT_DELIVERY_MODE}'.")
             delivery_mode = DEFAULT_DELIVERY_MODE
 
-        logger.info(f"Попытка добавления/обновления пользователя: {chat_id}, статус: {status}, режим: {delivery_mode}")
+        # Очищаем заметки перед использованием
+        cleaned_notes = notes.strip() if notes else ''
+
+        logger.info(f"Попытка добавления/обновления пользователя: {chat_id}, статус: {status}, режим: {delivery_mode}, заметки: {len(cleaned_notes)} символов")
 
         try:
             with self.get_connection() as conn:
-                # Явно начинаем транзакцию
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
-
                 now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # Используем INSERT OR REPLACE для добавления или обновления
+                # Обновлено: добавлено поле notes
                 query = '''
-                INSERT OR REPLACE INTO users (chat_id, status, delivery_mode, created_at, updated_at)
-                VALUES (?, ?, ?, COALESCE((SELECT created_at FROM users WHERE chat_id = ?), ?), ?)
+                INSERT OR REPLACE INTO users (chat_id, status, delivery_mode, notes, created_at, updated_at)
+                VALUES (?, ?, ?, ?, COALESCE((SELECT created_at FROM users WHERE chat_id = ?), ?), ?)
                 '''
 
-                cursor.execute(query, (chat_id, status, delivery_mode, chat_id, now, now))
-                conn.commit()  # Явный коммит
+                cursor.execute(query, (chat_id, status, delivery_mode, cleaned_notes, chat_id, now, now))
+                conn.commit()
 
                 rows_affected = cursor.rowcount
                 logger.info(f"Добавлен/обновлен пользователь {chat_id}: затронуто строк: {rows_affected}")
@@ -841,8 +896,8 @@ class DatabaseManager:
                 self._clear_cache(f"user_registered_{chat_id}")
                 self._clear_cache(f"user_status_{chat_id}")
                 self._clear_cache(f"user_delivery_mode_{chat_id}")
+                self._clear_cache(f"user_notes_{chat_id}")
                 self._clear_cache("all_users")
-                # Очищаем и другие кэши, которые могли зависеть от данных пользователя
                 self._clear_cache("all_subjects")
                 self._clear_cache("all_client_data")
                 self._clear_cache("active_users_with_subjects")
