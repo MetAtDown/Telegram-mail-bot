@@ -18,7 +18,8 @@
 <div class="panel">
     <div class="panel-header">Список администраторов</div>
     <div class="panel-body">
-        <table class="users-table">
+        {# Используем тот же класс, что и для таблицы пользователей, чтобы применились адаптивные стили #}
+        <table class="users-table responsive-table">
             <thead>
                 <tr>
                     <th>#</th>
@@ -32,9 +33,10 @@
             <tbody>
                 {% for user in users %}
                 <tr>
-                    <td>{{ user.id }}</td>
-                    <td>{{ user.username }}</td>
-                    <td>
+                    {# Добавляем data-label к каждой ячейке #}
+                    <td data-label="#">{{ user.id }}</td>
+                    <td data-label="Имя пользователя">{{ user.username }}</td>
+                    <td data-label="Роль">
                         {% if user.role == 'admin' %}
                         <span class="status-text active">Администратор</span>
                         {% elif user.role == 'operator' %}
@@ -43,14 +45,15 @@
                         <span class="status-text inactive" style="background-color: var(--neutral);">Наблюдатель</span>
                         {% endif %}
                     </td>
-                    <td>{{ user.last_login or 'Нет данных' }}</td>
-                    <td>
+                    <td data-label="Последний вход">{{ user.last_login or 'Нет данных' }}</td>
+                    <td data-label="Статус">
                         <span class="status-text {% if user.is_active %}active{% else %}inactive{% endif %}">
                             {{ 'Активен' if user.is_active else 'Отключен' }}
                         </span>
                     </td>
-                    <td class="actions-cell">
+                    <td class="actions-cell" data-label="Действия"> {# data-label и для ячейки с действиями #}
                         <a href="{{ url_for('edit_admin_user', user_id=user.id) }}" class="btn btn-warning">Изменить</a>
+                        {# Не удаляем самого себя #}
                         {% if user.id != session.user_id %}
                         <form method="post" action="{{ url_for('delete_admin_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.username }}?');">
                             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -68,4 +71,8 @@
         </table>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{# Если для этой страницы нужен специфичный JS, добавьте его здесь #}
 {% endblock %}

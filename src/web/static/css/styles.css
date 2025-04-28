@@ -1224,3 +1224,8 @@ tr:nth-child(even) {
     white-space: normal; /* Обеспечиваем нормальный перенос для работы -webkit-line-clamp */
     word-break: break-word; /* Разрешаем разрыв слов */
 }
+
+@media (max-width: 768px) {
+    .shark-easter-egg {
+        display: none; /* Просто прячем блок */
+    }
