@@ -612,60 +612,60 @@ def index():
 def users():
     """Страница со списком пользователей."""
     try:
-        # Получаем параметры пагинации и поиска
+        # Получаем параметры пагинации и ПОИСК БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ НА СЕРВЕРЕ
         page = request.args.get('page', 1, type=int)
-        search_query = request.args.get('search', '')
+        # search_query = request.args.get('search', '').strip() # Убираем серверный поиск
         per_page = ITEMS_PER_PAGE
 
-        # Получаем данные из кэша или обновляем
+        # Получаем данные из кэша или обновляем (включая заметки)
         def get_users_data():
-            user_states = db_manager.get_all_users()
+            all_users_details = db_manager.execute_optimized_query(
+                "SELECT chat_id, status, notes FROM users"
+            )
+            users_map = {
+                u['chat_id']: {
+                    'is_enabled': u['status'] == 'Enable',
+                    'status_text': 'Активен' if u['status'] == 'Enable' else 'Отключен',
+                    'notes': u.get('notes', '')
+                } for u in all_users_details
+            }
             client_data = db_manager.get_all_client_data()
-
             users_data = []
-            for chat_id, is_enabled in user_states.items():
+            for chat_id, details in users_map.items():
                 subjects = client_data.get(chat_id, [])
                 users_data.append({
                     'chat_id': chat_id,
-                    'status': 'Активен' if is_enabled else 'Отключен',
-                    'is_enabled': is_enabled,
-                    'subject_count': len(subjects)
+                    'status': details['status_text'],
+                    'is_enabled': details['is_enabled'],
+                    'subject_count': len(subjects),
+                    'notes': details['notes']
                 })
-
-            # Сортировка пользователей (сначала активные)
             users_data.sort(key=lambda x: (not x['is_enabled'], x['chat_id']))
-
             return users_data
 
-        users_data = get_cached_data('users_data', get_users_data, ttl=60)  # Кэшируем на минуту
+        # Получаем ВСЕ данные пользователей с заметками
+        all_users_data = get_cached_data('users_data_with_notes', get_users_data, ttl=60)
 
-        # Фильтрация по поисковому запросу
-        if search_query:
-            filtered_users = []
-            for user in users_data:
-                # Поиск по chat_id или статусу
-                if str(user['chat_id']).find(search_query) != -1 or user['status'].lower().find(
-                        search_query.lower()) != -1:
-                    filtered_users.append(user)
-            users_data = filtered_users
-
-        # Пагинация
-        total_users = len(users_data)
+        # Пагинация применяется ко всем данным
+        total_users = len(all_users_data) # Общее количество пользователей
         total_pages = math.ceil(total_users / per_page) if total_users > 0 else 1
 
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
-        paginated_users = users_data[start_idx:end_idx] if users_data else []
+        paginated_users = all_users_data[start_idx:end_idx] # Пагинируем полный список
 
         # Получаем роль пользователя для отображения доступных действий
         user_role = session.get('user_role', 'viewer')
+
+        # search_query передаем пустым, т.к. поиск клиентский
+        search_query = request.args.get('search', '') # Передаем для JS на случай, если он там нужен
 
         return render_template('users.html',
                                users=paginated_users,
                                page=page,
                                total_pages=total_pages,
-                               total_users=total_users,
-                               search_query=search_query,
+                               total_users=total_users, # Передаем ОБЩЕЕ кол-во
+                               search_query=search_query, # Передаем для JS, если он его использует
                                user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке списка пользователей: {e}", exc_info=True)

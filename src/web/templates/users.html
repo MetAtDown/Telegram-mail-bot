@@ -15,12 +15,14 @@
         <a href="{{ url_for('add_user') }}" class="btn btn-primary">Добавить пользователя</a>
     </div>
 
-    <div class="search-container">
-        <input type="text" class="search-input" placeholder="Поиск по chat_id или статусу..." value="{{ search_query or '' }}">
+    <!-- Контейнер для поиска (без формы, для клиентского JS) -->
+    <div class="search-container" data-target=".users-table"> {# Указываем цель для JS #}
+        <input type="text" class="search-input" placeholder="Поиск по chat_id, статусу или заметкам..." value="{{ search_query or '' }}">
         <div class="search-controls">
+            {# Кнопка поиска не обязательна для live-поиска, но можно оставить #}
             <button type="button" class="btn search-btn">Поиск</button>
             <button type="button" class="btn clear-btn">Очистить</button>
-            <div class="results-counter">Найдено: {{ total_users }}</div>
+            <div class="results-counter">Найдено: ...</div> {# JS обновит это #}
         </div>
     </div>
 
@@ -30,6 +32,7 @@
                 <th>Chat ID</th>
                 <th>Статус</th>
                 <th>Кол-во тем</th>
+                <th>Заметки</th> {# Заголовок для заметок #}
                 <th>Действия</th>
             </tr>
         </thead>
@@ -43,44 +46,81 @@
                     </span>
                 </td>
                 <td>{{ user.subject_count }}</td>
+                {# Ячейка для заметок с CSS усечением #}
+                <td class="notes-cell">
+                    {% if user.notes %}
+                        {# Применяем класс truncate-text и title для полного текста #}
+                        <span class="truncate-text" title="{{ user.notes }}">
+                            {{ user.notes }} {# Полный текст здесь, CSS его обрежет #}
+                        </span>
+                    {% else %}
+                        <span class="text-muted">-</span> {# Прочерк, если заметок нет #}
+                    {% endif %}
+                </td>
                 <td class="actions-cell">
                     <a href="{{ url_for('user_details', chat_id=user.chat_id) }}" class="btn btn-primary details-btn">Подробнее</a>
-                    <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <button type="submit" class="btn btn-danger delete-btn">Удалить</button>
-                    </form>
+                    {% if user_role in ['operator', 'admin'] %} {# Проверка роли для кнопки удаления #}
+                        <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-danger delete-btn">Удалить</button>
+                        </form>
+                    {% endif %}
                 </td>
             </tr>
             {% else %}
+             {# Эта строка будет видна только если пагинация вернула 0 пользователей #}
+             {# Сообщение об отсутствии результатов поиска будет добавлено через JS #}
             <tr>
-                <td colspan="4" class="text-center">Пользователи не найдены</td>
+                <td colspan="5" class="text-center">На этой странице пользователи не найдены.</td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
+    {# Сообщение об отсутствии результатов поиска (будет показано/скрыто через JS) #}
+    <div class="no-results-message" style="display: none; text-align: center; margin-top: 15px;">Ничего не найдено.</div>
 
+    {# Общее количество пользователей (всегда показываем общее) #}
     <div class="users-count">Всего: {{ total_users }} пользователей</div>
 
+    {# Пагинация без параметра search для клиентского поиска #}
     {% if total_pages > 1 %}
     <div class="pagination">
+        {# Ссылка на предыдущую страницу #}
         {% if page > 1 %}
-        <a href="{{ url_for('users', page=page-1, search=search_query) }}" class="pagination-item"><<</a>
+        <a href="{{ url_for('users', page=page-1) }}" class="pagination-item">«</a>
+        {% else %}
+        <span class="pagination-item disabled">«</span>
         {% endif %}
-        
+
+        {# Номера страниц с логикой отображения #}
         {% for i in range(1, total_pages + 1) %}
-        <a href="{{ url_for('users', page=i, search=search_query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+            {% if i == 1 or i == total_pages or i >= page - 2 and i <= page + 2 %}
+                {% if loop.previtem is defined and i > loop.previtem + 1 %}
+                    <span class="pagination-item ellipsis">...</span>
+                {% endif %}
+                <a href="{{ url_for('users', page=i) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+            {% endif %}
         {% endfor %}
-        
+
+        {# Ссылка на следующую страницу #}
         {% if page < total_pages %}
-        <a href="{{ url_for('users', page=page+1, search=search_query) }}" class="pagination-item">>></a>
+        <a href="{{ url_for('users', page=page+1) }}" class="pagination-item">»</a>
+        {% else %}
+        <span class="pagination-item disabled">»</span>
         {% endif %}
     </div>
     {% endif %}
-</div>
 
-<!-- Скрытая форма для серверного поиска при использовании пагинации -->
-<form action="{{ url_for('users') }}" method="get" id="server-search-form" style="display:none;">
-    <input type="hidden" name="search" id="server-search-input" value="{{ search_query or '' }}">
-    <input type="hidden" name="page" id="server-page-input" value="1">
-</form>
+    {# Скрытая форма для JS, если он должен передавать поиск при пагинации (не используется для клиентского поиска) #}
+    <form action="{{ url_for('users') }}" method="get" id="server-search-form" style="display:none;">
+        <input type="hidden" name="search" id="server-search-input">
+        <input type="hidden" name="page" id="server-page-input" value="1">
+    </form>
+</div>
+{% endblock %}
+
+{% block scripts %}
+{# Подключаем основной JS, который содержит setupUniversalSearch #}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+{# Убедитесь, что ваш main.js вызывает setupUniversalSearch() при загрузке DOM #}
 {% endblock %}

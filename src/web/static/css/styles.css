@@ -1165,3 +1165,62 @@ tr:nth-child(even) {
         min-width: 100px;
     }
 }
+
+/* Универсальный класс для усечения ОДНОЙ строки текста */
+.truncate-text {
+  display: inline-block; /* Используем inline-block для лучшей интеграции в ячейки */
+  white-space: nowrap;       /* Запрещаем перенос строк */
+  overflow: hidden;          /* Скрываем все, что не помещается */
+  text-overflow: ellipsis;   /* Добавляем троеточие */
+  max-width: 100%;           /* Позволяем родительскому элементу определять макс. ширину */
+  vertical-align: middle;    /* Выравнивание по вертикали */
+  cursor: help;              /* Указываем, что при наведении есть доп. инфо (tooltip) */
+}
+
+/* Класс для усечения МНОГОСТРОЧНОГО текста (для Заметок) */
+.truncate-text-multiline {
+  display: -webkit-box;
+  -webkit-line-clamp: 5; /* Количество строк для отображения (настройте по желанию) */
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis; /* Троеточие в конце последней видимой строки */
+  cursor: help;
+  /* white-space: normal !important; /* Важно для -webkit-line-clamp, если где-то унаследован nowrap/pre */
+  /* word-break: break-word; */ /* Помогает разрывать длинные слова, если нужно */
+}
+
+
+/* Применение усечения к ячейкам таблиц (SQL Консоль и Пользователи) */
+/* Делаем таблицы с фиксированной раскладкой для корректной работы max-width */
+.users-table,
+.results-table {
+    table-layout: fixed;
+    width: 100%;
+    /* word-wrap: break-word; /* Дополнительный перенос слов */
+}
+
+/* Применяем max-width и усечение к содержимому *внутри* ячеек */
+.users-table td .truncate-text,
+.results-table td .truncate-text {
+  max-width: 350px; /* Макс. ширина содержимого ячейки (настройте) */
+  width: 100%;      /* Занимаем доступную ширину до max-width */
+}
+
+/* Можно задать отдельную макс. ширину для колонки заметок в таблице пользователей */
+.users-table .notes-cell .truncate-text {
+     max-width: 250px; /* Например, сделать колонку заметок поуже */
+}
+
+
+/* Применение многострочного усечения к блоку заметок на странице деталей пользователя */
+.notes-section .notes-content.truncate-text-multiline {
+    /* Стили уже определены в .truncate-text-multiline */
+    /* Можно добавить ограничение по ширине, если нужно */
+    /* max-width: 70ch; */
+}
+
+/* Убираем стили pre для .notes-content, если они были унаследованы */
+.notes-section .notes-content {
+    white-space: normal; /* Обеспечиваем нормальный перенос для работы -webkit-line-clamp */
+    word-break: break-word; /* Разрешаем разрыв слов */
+}

@@ -80,7 +80,8 @@
                 </div>
                 
                 <div class="table-responsive">
-                    <table class="results-table">
+                    {# Добавляем класс data-table для применения CSS #}
+                    <table class="results-table data-table">
                         <thead>
                             <tr>
                                 {% for header in headers %}
@@ -92,7 +93,10 @@
                             {% for row in results %}
                             <tr>
                                 {% for header in headers %}
-                                <td>{{ row[header] }}</td>
+                                    {# Добавляем title и оборачиваем содержимое в span с классом truncate-text #}
+                                    <td title="{{ row[header] }}">
+                                        <span class="truncate-text">{{ row[header] }}</span>
+                                    </td>
                                 {% endfor %}
                             </tr>
                             {% endfor %}

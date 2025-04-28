@@ -43,7 +43,10 @@
             <div class="notes-section">
                 <h4>Заметки:</h4>
                 {% if user.notes %}
-                    <pre class="notes-content">{{ user.notes }}</pre>
+                    {# Используем div с новым классом и title #}
+                    <div class="notes-content truncate-text-multiline" title="{{ user.notes }}">
+                        {{ user.notes }} {# Отображаем полный текст, CSS его обрежет #}
+                    </div>
                 {% else %}
                     <p class="no-notes">Заметок нет.</p>
                 {% endif %}
