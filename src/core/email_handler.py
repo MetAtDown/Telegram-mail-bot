@@ -1048,77 +1048,153 @@ class EmailTelegramForwarder:
 
             # --- Отправка как текст ---
             else:
-                logger.info(f"Отправка письма '{email_data.get('subject', '')}' как текст для {chat_id} (режим: {user_delivery_mode}, длина тела: {message_length})")
+                logger.info(
+                    f"Отправка письма '{email_data.get('subject', '')}' как текст для {chat_id} (режим: {user_delivery_mode}, длина тела: {message_length})")
 
                 # Формируем заголовок с использованием MarkdownV2
-                # Экранируем данные из письма на случай наличия в них спецсимволов
                 header = (
-                     f"📧 *Новое письмо*\n"
-                     f"*От:* {self.escape_markdown_v2(email_data.get('from', 'N/A'))}\n"
-                     f"*Тема:* {self.escape_markdown_v2(email_data.get('subject', 'N/A'))}\n\n"
-                     #f"*Дата:* {self.escape_markdown_v2(email_data.get('date', 'N/A'))}\n\n"
+                    f"📧 *Новое письмо*\n"
+                    f"*От:* {self.escape_markdown_v2(email_data.get('from', 'N/A'))}\n"
+                    f"*Тема:* {self.escape_markdown_v2(email_data.get('subject', 'N/A'))}\n\n"
+                    # f"*Дата:* {self.escape_markdown_v2(email_data.get('date', 'N/A'))}\n\n" # Можно добавить, если нужно
                 )
 
-                # Экранируем ТЕЛО письма перед конкатенацией
+                # Экранируем ТЕЛО письма перед дальнейшей обработкой
                 escaped_body = self.escape_markdown_v2(formatted_body)
-                full_message_text = header + escaped_body
 
-                # Разбиваем ПОЛНЫЙ текст (заголовок + экранированное тело) на части
-                # Используем лимит с запасом, но Telegram сам должен резать по символам UTF-8, а не байтам
-                message_parts = self.split_text(full_message_text, max_length=TELEGRAM_MAX_LEN)
-                part_to_log = "N/A" # Для логирования ошибки
+                # ---- НОВАЯ ЛОГИКА РАЗБИЕНИЯ ----
+                full_message_text_with_header = header + escaped_body  # Собираем полный текст С ЗАГОЛОВКОМ
+                logical_separator = "________________"
+                # Экранируем сам разделитель, так как ищем его в УЖЕ экранированном тексте
+                escaped_logical_separator = self.escape_markdown_v2(logical_separator)
+                # Важно: Убедитесь, что escape_markdown_v2 правильно обрабатывает строку из подчеркиваний.
+                # Она должна превратить "________________" в "\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_\_"
+                logger.debug(
+                    f"Используется экранированный разделитель: '{escaped_logical_separator}'")  # Добавим лог для проверки
+
+                TELEGRAM_MAX_LEN = 4096  # Максимальная длина сообщения Telegram
+
+                # 1. Разбиваем ПОЛНЫЙ текст (с заголовком) по ЭКРАНИРОВАННОМУ разделителю
+                logical_blocks_raw = full_message_text_with_header.split(escaped_logical_separator)
+                logger.debug(f"Текст разбит на {len(logical_blocks_raw)} логических блока(ов).")  # Добавим лог
+
+                final_message_parts = []  # Сюда соберем финальные части для отправки
+
+                for i, block in enumerate(logical_blocks_raw):
+                    trimmed_block = block.strip()  # Убираем пробелы/переносы по краям блока
+
+                    # Пропускаем пустые блоки, которые могли образоваться (например, два разделителя подряд)
+                    if not trimmed_block:
+                        continue
+
+                    # Если это не первый блок, и исходный текст *не* начинался с разделителя,
+                    # возможно, стоит добавить визуальный отступ или сам разделитель сверху?
+                    # Пока оставим без этого, чтобы соответствовать примеру.
+                    # if i > 0 and not full_message_text_with_header.startswith(logical_separator):
+                    #    trimmed_block = "\n" + trimmed_block # Добавляем перенос перед следующим блоком
+
+                    # 2. Проверяем длину КАЖДОГО логического блока
+                    if len(trimmed_block) <= TELEGRAM_MAX_LEN:
+                        # Если блок помещается целиком, добавляем его как есть
+                        final_message_parts.append(trimmed_block)
+                    else:
+                        # Если логический блок САМ по себе слишком длинный
+                        logger.warning(
+                            f"Логический блок (начинающийся с '{trimmed_block[:50]}...') "
+                            f"длиной {len(trimmed_block)} символов превышает лимит Telegram. "
+                            f"Он будет разбит на части стандартным способом."
+                        )
+                        # Разбиваем ЭТОТ СЛИШКОМ ДЛИННЫЙ БЛОК стандартной функцией split_text
+                        sub_parts = self.split_text(trimmed_block, max_length=TELEGRAM_MAX_LEN)
+                        final_message_parts.extend(sub_parts)  # Добавляем все его части
+
+                # ---- КОНЕЦ НОВОЙ ЛОГИКИ РАЗБИЕНИЯ ----
+
+                # Теперь `final_message_parts` содержит либо целые логические блоки,
+                # либо части слишком больших логических блоков.
+                part_to_log = "N/A"  # Для логирования ошибки
 
                 try:
                     if not has_attachments:
-                        # Отправляем все части текста
-                        for i, part in enumerate(message_parts):
-                            part_to_log = part # Запоминаем текущую часть для лога ошибки
+                        # Отправляем все части текста из final_message_parts
+                        for i, part in enumerate(final_message_parts):
+                            part_to_log = part  # Запоминаем текущую часть для лога ошибки
                             self._send_telegram_message_with_retry(
                                 self.bot.send_message,
                                 chat_id,
                                 part,
-                                parse_mode='MarkdownV2', # Используем MarkdownV2
+                                parse_mode='MarkdownV2',  # Используем MarkdownV2
                                 disable_web_page_preview=True
                             )
-                            if len(message_parts) > 1: time.sleep(0.5) # Пауза между частями
+                            # Добавляем паузу, если частей несколько
+                            if len(final_message_parts) > 1 and i < len(final_message_parts) - 1:
+                                time.sleep(0.5)
                     else:
                         # Есть вложения
-                        # Если ПОЛНЫЙ текст (заголовок + экранированное тело) <= 1024 и одно вложение
-                        if len(full_message_text) <= 1024 and len(email_data["attachments"]) == 1:
+
+                        # --- Логика отправки с вложениями ---
+                        # Определяем, можем ли отправить первое вложение с первым текстом как caption
+                        can_use_caption = False
+                        if (len(final_message_parts) > 0  # Есть текст
+                                and len(final_message_parts[0]) <= 1024  # Первая часть текста помещается в caption
+                                and len(email_data["attachments"]) == 1):  # И только одно вложение
+                            can_use_caption = True
+
+                        if can_use_caption:
                             first_attachment = email_data["attachments"][0]
-                            # Передаем УЖЕ готовый и экранированный текст в caption
-                            self.send_attachment_with_message(chat_id, first_attachment, full_message_text)
-                        else:
-                            # Отправляем текст частями
-                            for i, part in enumerate(message_parts):
-                                part_to_log = part # Запоминаем текущую часть
+                            # Отправляем первое вложение с первой частью текста как caption
+                            self.send_attachment_with_message(chat_id, first_attachment, final_message_parts[0])
+                            # Отправляем ОСТАЛЬНЫЕ части текста (если они есть)
+                            for i, part in enumerate(final_message_parts[1:]):
+                                part_to_log = part
                                 self._send_telegram_message_with_retry(
                                     self.bot.send_message,
                                     chat_id,
                                     part,
-                                    parse_mode='MarkdownV2', # Используем MarkdownV2
+                                    parse_mode='MarkdownV2',
                                     disable_web_page_preview=True
-                                    )
-                                if len(message_parts) > 1: time.sleep(0.5)
+                                )
+                                if len(final_message_parts) > 2 and i < len(final_message_parts) - 2:
+                                    time.sleep(0.5)
+                        else:
+                            # Отправляем ВСЕ части текста по очереди
+                            for i, part in enumerate(final_message_parts):
+                                part_to_log = part
+                                self._send_telegram_message_with_retry(
+                                    self.bot.send_message,
+                                    chat_id,
+                                    part,
+                                    parse_mode='MarkdownV2',
+                                    disable_web_page_preview=True
+                                )
+                                # Пауза между частями текста
+                                if len(final_message_parts) > 1 and i < len(final_message_parts) - 1:
+                                    time.sleep(0.5)
 
-                            # Затем отправляем вложения
-                            logger.info(f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после текста.")
+                            # Затем отправляем ВСЕ вложения по очереди
+                            logger.info(
+                                f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после текста.")
                             for attachment in email_data["attachments"]:
                                 self.send_attachment_to_telegram(chat_id, attachment)
-                                time.sleep(0.5) # Пауза между вложениями
+                                time.sleep(0.5)  # Пауза между вложениями
 
-                    logger.info(f"Сообщение успешно отправлено текстом в чат {chat_id}")
+                    logger.info(
+                        f"Сообщение (возможно, из нескольких частей) успешно отправлено текстом в чат {chat_id}")
                     return True
 
+                # ... (остальная часть try/except блока без изменений) ...
                 except Exception as e_text:
                     # Логируем ошибку и ПРЕВЬЮ части, на которой произошла ошибка
                     failing_part_preview = part_to_log[:200] + ('...' if len(part_to_log) > 200 else '')
-                    logger.error(f"Ошибка при отправке текстового сообщения или вложений для {chat_id} (часть: '{failing_part_preview}'): {e_text}", exc_info=True)
+                    logger.error(
+                        f"Ошибка при отправке текстового сообщения или вложений для {chat_id} (часть: '{failing_part_preview}'): {e_text}",
+                        exc_info=True)
                     try:
                         # Экранируем тему в сообщении об ошибке и отправляем без parse_mode
                         error_text = f"⚠️ Не удалось отправить часть письма '{self.escape_markdown_v2(email_data.get('subject', ''))}' (текст)."
                         self._send_telegram_message_with_retry(self.bot.send_message, chat_id, error_text)
-                    except Exception: pass
+                    except Exception:
+                        pass
                     return False
 
         except Exception as e_main:
