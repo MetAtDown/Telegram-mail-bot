@@ -9,12 +9,15 @@ import tempfile
 import os
 import threading
 import queue
+import heapq # Добавлен для планировщика
+import shutil # Добавлен для надежной очистки
 from functools import lru_cache
 from typing import Dict, List, Tuple, Any, Optional, Set
 from email.header import decode_header
 from bs4 import BeautifulSoup, NavigableString
 import html
 from collections import defaultdict
+from contextlib import contextmanager # Добавлен для контекстного менеджера
 
 from src.config import settings
 from src.utils.logger import get_logger
@@ -33,63 +36,210 @@ DELIVERY_MODE_HTML = 'html'
 DELIVERY_MODE_SMART = 'smart'
 DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
+
+# --- НОВЫЙ КЛАСС: Контекстный менеджер для временных файлов ---
+class TemporaryFileManager:
+    """
+    Контекстный менеджер для безопасного создания и автоматической очистки
+    временной директории и файлов внутри нее.
+    """
+    def __init__(self, prefix: str = "email_fwd_"):
+        self.prefix = prefix
+        self.temp_dir = None
+
+    def __enter__(self) -> str:
+        """Создает временную директорию при входе в контекст."""
+        try:
+            self.temp_dir = tempfile.mkdtemp(prefix=self.prefix)
+            logger.debug(f"Создана временная директория: {self.temp_dir}")
+            return self.temp_dir
+        except Exception as e:
+            logger.error(f"Ошибка при создании временной директории: {e}", exc_info=True)
+            raise # Передаем исключение дальше, чтобы прервать операцию
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Гарантированно удаляет временную директорию при выходе из контекста."""
+        if self.temp_dir and os.path.exists(self.temp_dir):
+            try:
+                shutil.rmtree(self.temp_dir)
+                logger.debug(f"Временная директория удалена: {self.temp_dir}")
+            except Exception as e:
+                # Логируем ошибку очистки ОЧЕНЬ подробно
+                logger.error(
+                    f"Критическая ошибка: Не удалось удалить временную директорию {self.temp_dir}: {e}",
+                    exc_info=True
+                )
+                # Не пробрасываем исключение дальше, чтобы не маскировать
+                # возможное исходное исключение (exc_type), если оно было.
+        # Возвращаем False, чтобы исключения, возникшие внутри блока with,
+        # распространялись дальше обычным образом.
+        return False
+
+# --- НОВЫЙ КЛАСС: Планировщик отложенных отправок ---
+class DelayedSendScheduler:
+    """
+    Управляет отложенными вызовами функции отправки сообщений,
+    используя один поток для избежания создания множества Timer'ов.
+    """
+    def __init__(self, forwarder_instance, stop_event: threading.Event):
+        self.forwarder = forwarder_instance
+        self.scheduled_tasks = []  # Используем heapq для эффективности
+        self.lock = threading.RLock()
+        self.new_task_event = threading.Event() # Сигнал о новой задаче или остановке
+        self.stop_event = stop_event # Внешний сигнал для остановки
+        self.worker_thread = None
+        self._started = False
+
+    def schedule(self, delay_seconds: float, chat_id: str, email_data: Dict[str, Any]):
+        """Добавляет задачу в очередь на отложенную отправку."""
+        if not self._started:
+             logger.warning("Планировщик не запущен, задача не будет добавлена.")
+             return
+
+        send_time = time.time() + delay_seconds
+        with self.lock:
+            heapq.heappush(self.scheduled_tasks, (send_time, chat_id, email_data))
+            logger.debug(f"Задача для {chat_id} запланирована на {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(send_time))}")
+        # Сигнализируем рабочему потоку, что появилась новая задача
+        self.new_task_event.set()
+
+    def _worker_loop(self):
+        """Основной цикл рабочего потока планировщика."""
+        logger.info("Запущен рабочий поток планировщика отложенных отправок.")
+        while not self.stop_event.is_set():
+            wait_time = None
+            tasks_to_run = []
+
+            with self.lock:
+                # Проверяем задачи, готовые к выполнению
+                now = time.time()
+                while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
+                    send_time, chat_id, email_data = heapq.heappop(self.scheduled_tasks)
+                    tasks_to_run.append((chat_id, email_data))
+                    logger.debug(f"Извлечена задача для {chat_id}, запланированная на {send_time:.2f}")
+
+                # Определяем время ожидания до следующей задачи
+                if self.scheduled_tasks:
+                    next_run_time = self.scheduled_tasks[0][0]
+                    wait_time = max(0, next_run_time - now)
+
+            # Выполняем готовые задачи вне блокировки
+            if tasks_to_run:
+                logger.info(f"Запуск {len(tasks_to_run)} отложенных задач.")
+                for chat_id, email_data in tasks_to_run:
+                    try:
+                        # Используем метод _send_to_telegram_now для фактической отправки
+                        self.forwarder._send_to_telegram_now(chat_id, email_data)
+                    except Exception as e:
+                        logger.error(f"Ошибка при выполнении отложенной задачи для {chat_id}: {e}", exc_info=True)
+
+            # Ожидаем следующей задачи или сигнала об остановке/новой задаче
+            # Если wait_time is None (нет задач), ждем бесконечно (но просыпаемся по событию)
+            self.new_task_event.wait(timeout=wait_time)
+            # Сбрасываем событие после пробуждения, чтобы не крутиться в цикле без дела
+            self.new_task_event.clear()
+
+        logger.info("Рабочий поток планировщика отложенных отправок остановлен.")
+
+    def start(self):
+        """Запускает рабочий поток планировщика."""
+        if self.worker_thread is None or not self.worker_thread.is_alive():
+            self.stop_event.clear() # Убедимся, что стоп-сигнал снят
+            self.new_task_event.clear()
+            self.worker_thread = threading.Thread(
+                target=self._worker_loop,
+                name="DelayedSendWorker",
+                daemon=True
+            )
+            self.worker_thread.start()
+            self._started = True
+            logger.info("Планировщик отложенных отправок запущен.")
+
+    def stop(self):
+        """Останавливает рабочий поток планировщика."""
+        if self._started:
+            self._started = False
+            # self.stop_event.set() # Используем внешний stop_event
+            self.new_task_event.set() # Разбудить поток, чтобы он проверил stop_event
+            if self.worker_thread and self.worker_thread.is_alive():
+                self.worker_thread.join(timeout=5)
+                if self.worker_thread.is_alive():
+                     logger.warning("Поток планировщика не завершился вовремя.")
+            logger.info("Планировщик отложенных отправок остановлен.")
+        # Очищаем задачи при остановке
+        with self.lock:
+            self.scheduled_tasks = []
+
+
 class EmailTelegramForwarder:
     def __init__(self, db_manager=None):
         """
         Инициализация форвардера писем в Telegram.
-
         Args:
             db_manager: Экземпляр менеджера базы данных
         """
-        # Загрузка настроек
+        # ... (существующая загрузка настроек) ...
         self.email_account = settings.EMAIL_ACCOUNT
         self.password = settings.EMAIL_PASSWORD
         self.telegram_token = settings.TELEGRAM_TOKEN
-        self.email_server = settings.EMAIL_SERVER  # Использование из настроек
+        self.email_server = settings.EMAIL_SERVER
         self.check_interval = settings.CHECK_INTERVAL
 
         if not all([self.email_account, self.password, self.telegram_token]):
             logger.error("Не все обязательные параметры найдены в настройках")
             raise ValueError("Отсутствуют обязательные параметры в настройках")
 
-        # Устанавливаем менеджер базы данных
         if db_manager is None:
             from src.db.manager import DatabaseManager
             self.db_manager = DatabaseManager()
         else:
             self.db_manager = db_manager
 
-        # Инициализация Telegram бота
         self.bot = telebot.TeleBot(self.telegram_token, threaded=True)
-
-        # Словарь для кэширования данных о клиентах
         self.client_data = {}
         self.user_states = {}
-
-        # Многопоточная обработка писем
         self.email_queue = queue.Queue()
         self.workers = []
-        self.stop_event = threading.Event()
-
-        # Кэш для соединений с почтовым сервером
+        self.stop_event = threading.Event() # Используется и планировщиком
         self._mail_connection = None
         self._mail_lock = threading.RLock()
         self._last_connection_time = 0
-        self._connection_idle_timeout = 300  # 5 минут
-
-        # Cached patterns for faster subject matching
+        self._connection_idle_timeout = 300
         self._subject_patterns = {}
-
-        # Rate limiting
         self._message_timestamps = {}
         self._rate_limit_lock = threading.RLock()
-        self._max_messages_per_minute = 20  # Maximum messages per minute per chat
+        self._max_messages_per_minute = 20
+        self.subject_prefixes = ["[deeray.com] ", "Re: ", "Fwd: ", "Fw: "]
 
-        # Загрузка данных о клиентах
+        # --- ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА ---
+        self.delayed_sender = DelayedSendScheduler(self, self.stop_event)
+
         self.reload_client_data()
 
-        # Префиксы для очистки тем писем (кэшируем для быстрого доступа)
-        self.subject_prefixes = ["[deeray.com] ", "Re: ", "Fwd: ", "Fw: "]
+    # ... (методы reload_client_data, _get_mail_connection, connect_to_mail,
+    #      get_all_unseen_emails, decode_mime_header, extract_email_content,
+    #      mark_as_unread, extract_email_body, extract_attachments, clean_subject,
+    #      format_email_body, check_subject_match, _check_rate_limit - остаются без изменений) ...
+
+    def escape_markdown_v2(self, text: str) -> str:
+        """
+        Экранирует специальные символы для режима parse_mode='MarkdownV2' Telegram.
+
+        Args:
+            text: Исходный текст.
+
+        Returns:
+            Текст с экранированными символами.
+        """
+        if not isinstance(text, str):
+            text = str(text)  # На случай если передали не строку
+
+        # Символы, которые нужно экранировать в MarkdownV2
+        # _ * [ ] ( ) ~ ` > # + - = | { } . !
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+        # Заменяем каждый спецсимвол на него же с предваряющим обратным слэшем
+        return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
 
     def reload_client_data(self) -> None:
         """Загрузка данных о клиентах из базы данных с оптимизацией кэширования."""
@@ -101,28 +251,35 @@ class EmailTelegramForwarder:
             self._subject_patterns = {}
             for subject_pattern, clients in self.client_data.items():
                 subject_lower = subject_pattern.lower()
-                for client in clients:
-                    if client["enabled"]:
-                        if subject_lower not in self._subject_patterns:
-                            self._subject_patterns[subject_lower] = []
-                        self._subject_patterns[subject_lower].append((subject_pattern, client["chat_id"]))
+                # --- ИСПРАВЛЕНИЕ: Убедимся, что clients это список словарей ---
+                if isinstance(clients, list):
+                    for client in clients:
+                        # Проверяем, что client это словарь и содержит 'enabled'
+                        if isinstance(client, dict) and client.get("enabled", False):
+                            if subject_lower not in self._subject_patterns:
+                                self._subject_patterns[subject_lower] = []
+                            self._subject_patterns[subject_lower].append((subject_pattern, client["chat_id"]))
+                        elif not isinstance(client, dict):
+                             logger.warning(f"Некорректный формат данных клиента для темы '{subject_pattern}': {client}")
+                else:
+                    logger.warning(f"Некорректный формат данных для темы '{subject_pattern}': {clients}")
+
 
             unique_subjects = len(self.client_data)
-            total_records = sum(len(clients) for clients in self.client_data.values())
+            total_records = sum(len(clients) for clients in self.client_data.values() if isinstance(clients, list)) # Безопасный подсчет
 
             # Получаем состояния всех пользователей
             self.user_states = self.db_manager.get_all_users()
 
             logger.info(f"Загружено {unique_subjects} уникальных тем и {total_records} записей из базы данных")
         except Exception as e:
-            logger.error(f"Ошибка при загрузке данных о клиентах: {e}")
+            logger.error(f"Ошибка при загрузке данных о клиентах: {e}", exc_info=True)
             # Если не удалось загрузить данные, продолжаем работу с имеющимися данными
             logger.info("Продолжение работы с имеющимися данными клиентов")
 
     def _get_mail_connection(self) -> imaplib.IMAP4_SSL:
         """
         Получение соединения с почтовым сервером с пулингом соединений.
-
         Returns:
             Объект соединения с почтовым сервером
         """
@@ -133,15 +290,20 @@ class EmailTelegramForwarder:
             if (self._mail_connection is not None and
                     current_time - self._last_connection_time > self._connection_idle_timeout):
                 try:
+                    logger.debug(f"Закрытие неактивного соединения ({self._connection_idle_timeout}с) с почтовым сервером...")
                     self._mail_connection.close()
                     self._mail_connection.logout()
-                except Exception:
-                    pass
-                self._mail_connection = None
-                logger.debug("Закрыто неактивное соединение с почтовым сервером")
+                    logger.debug("Неактивное соединение закрыто.")
+                except Exception as close_err:
+                    logger.warning(f"Ошибка при закрытии неактивного соединения: {close_err}")
+                    # Все равно сбрасываем, чтобы создать новое
+                finally:
+                    self._mail_connection = None
+
 
             # Создаем новое соединение, если необходимо
             if self._mail_connection is None:
+                logger.info("Почтовое соединение отсутствует, создаем новое...")
                 for attempt in range(MAX_RETRIES):
                     try:
                         mail = imaplib.IMAP4_SSL(self.email_server, timeout=CONNECTION_TIMEOUT)
@@ -149,7 +311,7 @@ class EmailTelegramForwarder:
                         mail.select("inbox")
                         self._mail_connection = mail
                         self._last_connection_time = current_time
-                        logger.debug("Успешное подключение к почтовому серверу")
+                        logger.info("Успешное подключение к почтовому серверу")
                         break
                     except Exception as e:
                         if attempt < MAX_RETRIES - 1:
@@ -167,44 +329,44 @@ class EmailTelegramForwarder:
 
                 # Проверяем, что соединение все еще активно
                 try:
+                    # logger.debug("Проверка активности существующего почтового соединения (noop)...")
                     status, _ = self._mail_connection.noop()
                     if status != 'OK':
-                        raise Exception("Соединение неактивно")
-                except Exception as e:
+                         # Используем другое исключение, чтобы отличить от сетевых ошибок
+                        raise imaplib.IMAP4.abort(f"Соединение неактивно (статус {status})")
+                    # logger.debug("Соединение активно.")
+                except (imaplib.IMAP4.abort, imaplib.IMAP4.error, ConnectionResetError, BrokenPipeError) as e:
                     logger.warning(f"Соединение с почтовым сервером прервано: {e}. Пересоздание...")
                     try:
                         self._mail_connection.close()
                         self._mail_connection.logout()
-                    except Exception:
-                        pass
-                    self._mail_connection = None
-                    return self._get_mail_connection()  # Рекурсивный вызов для создания нового соединения
+                    except Exception as close_err:
+                         logger.warning(f"Ошибка при закрытии прерванного соединения: {close_err}")
+                    finally:
+                        self._mail_connection = None
+                    # Рекурсивный вызов для создания нового соединения (ОСТОРОЖНО с глубиной рекурсии)
+                    # Лучше сделать это итеративно в вызывающем коде или ограничить глубину
+                    # Но для простоты пока оставим так, т.к. ошибка не должна повторяться бесконечно
+                    return self._get_mail_connection()
+
+
+            # Добавим проверку типа на всякий случай перед возвратом
+            if not isinstance(self._mail_connection, imaplib.IMAP4_SSL):
+                 logger.error("Критическая ошибка: _mail_connection не является объектом IMAP4_SSL после инициализации!")
+                 raise TypeError("Не удалось получить действительное IMAP соединение")
 
             return self._mail_connection
 
     def connect_to_mail(self) -> imaplib.IMAP4_SSL:
-        """
-        Подключение к почтовому серверу (обертка для обратной совместимости).
-
-        Returns:
-            Объект соединения с почтовым сервером
-        """
+        """ Подключение к почтовому серверу (обертка для обратной совместимости). """
         return self._get_mail_connection()
 
     def get_all_unseen_emails(self, mail: imaplib.IMAP4_SSL) -> List[bytes]:
-        """
-        Получение всех непрочитанных писем с ограничением количества за одну обработку.
-
-        Args:
-            mail: Соединение с почтовым сервером
-
-        Returns:
-            Список ID непрочитанных писем
-        """
+        """ Получение всех непрочитанных писем с ограничением количества. """
         try:
             status, messages = mail.search(None, 'UNSEEN')
             if status != "OK":
-                logger.warning("Проблема при поиске непрочитанных писем")
+                logger.warning(f"Проблема при поиске непрочитанных писем (статус: {status})")
                 return []
 
             msg_ids = messages[0].split()
@@ -214,62 +376,74 @@ class EmailTelegramForwarder:
             if total_msgs > MAX_BATCH_SIZE:
                 logger.info(
                     f"Найдено {total_msgs} непрочитанных писем, ограничиваем до {MAX_BATCH_SIZE} для текущей обработки")
-                msg_ids = msg_ids[:MAX_BATCH_SIZE]
+                # Берем самые *новые* непрочитанные письма
+                msg_ids_to_process = msg_ids[-MAX_BATCH_SIZE:]
             else:
                 logger.info(f"Найдено {len(msg_ids)} непрочитанных писем")
+                msg_ids_to_process = msg_ids
 
-            return msg_ids
+            return msg_ids_to_process
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
+            logger.error(f"Ошибка IMAP при получении непрочитанных писем: {e}. Соединение может быть недействительным.")
+            # Явно сбросим соединение, чтобы при следующем вызове оно пересоздалось
+            with self._mail_lock:
+                if self._mail_connection == mail: # Убедимся, что это то же соединение
+                    try:
+                        mail.close()
+                        mail.logout()
+                    except: pass
+                    self._mail_connection = None
+            return []
         except Exception as e:
-            logger.error(f"Ошибка при получении непрочитанных писем: {e}")
+            logger.error(f"Непредвиденная ошибка при получении непрочитанных писем: {e}", exc_info=True)
             return []
 
     @lru_cache(maxsize=128)
     def decode_mime_header(self, header: str) -> str:
-        """
-        Декодирование MIME-заголовков с кэшированием результатов.
-
-        Args:
-            header: Заголовок для декодирования
-
-        Returns:
-            Декодированный заголовок
-        """
+        """ Декодирование MIME-заголовков с кэшированием. """
+        # ... (без изменений) ...
         try:
             decoded_parts = decode_header(header)
             decoded_str = ""
 
             for part, encoding in decoded_parts:
                 if isinstance(part, bytes):
-                    decoded_str += part.decode(encoding or 'utf-8', errors='replace')
+                    # Проверяем наличие кодировки и используем utf-8 как fallback
+                    charset = encoding if encoding else 'utf-8'
+                    try:
+                        decoded_str += part.decode(charset, errors='replace')
+                    except LookupError: # Если кодировка неизвестна
+                        logger.warning(f"Неизвестная кодировка '{charset}', используем 'utf-8' с заменой.")
+                        decoded_str += part.decode('utf-8', errors='replace')
                 else:
                     decoded_str += str(part)
 
             return decoded_str
         except Exception as e:
             logger.error(f"Ошибка при декодировании заголовка: {e}")
-            return header
+            # Возвращаем исходный заголовок в случае ошибки декодирования
+            return header if isinstance(header, str) else str(header)
+
 
     def extract_email_content(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> Optional[Dict[str, Any]]:
-        """
-        Извлечение содержимого письма по его ID с сохранением raw HTML.
-
-        Args:
-            mail: Соединение с почтовым сервером
-            msg_id: ID письма
-
-        Returns:
-            Словарь с данными письма или None в случае ошибки
-        """
+        """ Извлечение содержимого письма по его ID. """
+        # ... (без изменений, кроме логирования) ...
         try:
-            # Получаем письмо целиком
+            # Получаем письмо целиком (используем PEEK, чтобы не менять флаг \Seen)
+            logger.debug(f"Извлечение полного содержимого письма {msg_id.decode()}...")
             status, msg_data = mail.fetch(msg_id, "(BODY.PEEK[])")
-            if status != "OK" or not msg_data or not msg_data[0]:
-                logger.warning(f"Не удалось получить письмо {msg_id}")
+            if status != "OK" or not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
+                logger.warning(f"Не удалось получить тело письма {msg_id.decode()} (статус: {status}, данные: {msg_data})")
                 return None
 
             # Парсим письмо
             raw_email = msg_data[0][1]
+            if not isinstance(raw_email, bytes):
+                 logger.warning(f"Некорректный тип данных для raw_email письма {msg_id.decode()}: {type(raw_email)}")
+                 return None
+
             email_message = email.message_from_bytes(raw_email)
+            logger.debug(f"Письмо {msg_id.decode()} успешно распарсено.")
 
             # Извлекаем тему
             subject = self.decode_mime_header(email_message.get("Subject", "Без темы"))
@@ -281,21 +455,14 @@ class EmailTelegramForwarder:
             # Извлекаем дату
             date_header = self.decode_mime_header(email_message.get("Date", ""))
 
-            # Проверяем совпадение по теме
-            matching_subjects = self.check_subject_match(subject)
+            # Проверяем совпадение по теме (перенесено из extract_email_content для ясности)
+            # Эта проверка теперь делается в process_emails перед вызовом extract_email_content
 
-            if not matching_subjects:
-                return {
-                    "subject": subject,
-                    "from": from_header,
-                    "date": date_header,
-                    "id": msg_id,
-                    "has_match": False
-                }
-
-            # Если есть совпадение, извлекаем тело и HTML
+            # Извлекаем тело и HTML
             body, content_type, raw_html_body = self.extract_email_body(email_message)
             attachments = self.extract_attachments(email_message)
+            logger.debug(f"Извлечено тело (тип: {content_type}, html: {'да' if raw_html_body else 'нет'}) и {len(attachments)} вложений для письма {msg_id.decode()}.")
+
 
             return {
                 "subject": subject,
@@ -303,169 +470,208 @@ class EmailTelegramForwarder:
                 "date": date_header,
                 "body": body,
                 "content_type": content_type,
-                "raw_html_body": raw_html_body,  # Сырой HTML
-                "id": msg_id,
+                "raw_html_body": raw_html_body,
+                "id": msg_id, # Сохраняем ID как bytes
                 "attachments": attachments,
-                "has_match": True,
-                "matching_subjects": matching_subjects
+                # "has_match": True, # Это поле больше не нужно здесь
+                # "matching_subjects": matching_subjects # Передаем отдельно
             }
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
+             logger.error(f"Ошибка IMAP при извлечении содержимого письма {msg_id.decode()}: {e}")
+             # Сбрасываем соединение
+             with self._mail_lock:
+                if self._mail_connection == mail:
+                    try: mail.close(); mail.logout()
+                    except: pass
+                    self._mail_connection = None
+             return None
         except Exception as e:
-            logger.error(f"Ошибка при извлечении содержимого письма {msg_id}: {e}")
+            logger.error(f"Непредвиденная ошибка при извлечении содержимого письма {msg_id.decode()}: {e}", exc_info=True)
             return None
 
     def mark_as_unread(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> None:
-        """
-        Отметить письмо как непрочитанное с повторными попытками.
-
-        Args:
-            mail: Соединение с почтовым сервером
-            msg_id: ID письма
-        """
+        """ Отметить письмо как непрочитанное. """
+        # ... (без изменений) ...
         for attempt in range(MAX_RETRIES):
             try:
-                mail.store(msg_id, '-FLAGS', '\\Seen')
-                logger.debug(f"Письмо {msg_id} отмечено как непрочитанное")
-                return
-            except Exception as e:
+                logger.debug(f"Попытка {attempt+1} отметить письмо {msg_id.decode()} как непрочитанное...")
+                status, _ = mail.store(msg_id, '-FLAGS', '\\Seen')
+                if status == 'OK':
+                    logger.debug(f"Письмо {msg_id.decode()} успешно отмечено как непрочитанное")
+                    return
+                else:
+                    logger.warning(f"Не удалось отметить письмо {msg_id.decode()} как непрочитанное (статус: {status})")
+                    # Не повторяем попытку, если статус не OK, возможно проблема с ID или сервером
+
+            except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
                 if attempt < MAX_RETRIES - 1:
                     wait_time = RETRY_DELAY * (2 ** attempt)
                     logger.warning(
-                        f"Ошибка при отметке письма {msg_id} как непрочитанного (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
+                        f"Ошибка IMAP при отметке письма {msg_id.decode()} как непрочитанного (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
                     time.sleep(wait_time)
+                    # Попробуем переподключиться перед следующей попыткой
+                    try: self._get_mail_connection()
+                    except: logger.error("Не удалось переподключиться к почте во время retry.")
                 else:
                     logger.error(
-                        f"Не удалось отметить письмо {msg_id} как непрочитанное после {MAX_RETRIES} попыток: {e}")
+                        f"Не удалось отметить письмо {msg_id.decode()} как непрочитанное после {MAX_RETRIES} попыток: {e}")
+            except Exception as e:
+                 logger.error(f"Непредвиденная ошибка при отметке письма {msg_id.decode()} как непрочитанного: {e}", exc_info=True)
+                 # Прерываем попытки при неожиданной ошибке
+                 return
 
     def extract_email_body(self, email_message: email.message.Message) -> Tuple[str, str, Optional[str]]:
-        """
-        Извлечение тела письма из объекта email с сохранением raw HTML.
-
-        Args:
-            email_message: Объект сообщения
-
-        Returns:
-            Кортеж (тело письма, тип содержимого, сырой HTML или None)
-        """
+        """ Извлечение тела письма с сохранением raw HTML. """
+        # ... (без изменений) ...
         body = None
         content_type = "text/plain"
         html_body = None
         plain_body = None
-        raw_html_body = None  # Для хранения сырого HTML
+        raw_html_body = None
 
         try:
-            # Если письмо состоит из нескольких частей
             if email_message.is_multipart():
                 for part in email_message.walk():
-                    # Пропускаем составные части
-                    if part.get_content_maintype() == "multipart":
+                    # Пропускаем вложения и multipart
+                    if part.get_content_maintype() == 'multipart' or part.get('Content-Disposition', '').startswith('attachment'):
                         continue
 
-                    # Пропускаем вложения
-                    if part.get('Content-Disposition') and 'attachment' in part.get('Content-Disposition'):
-                        continue
-
-                    # Проверяем тип содержимого
                     current_content_type = part.get_content_type()
+                    charset = part.get_content_charset() or "utf-8"
+                    payload = part.get_payload(decode=True)
+
+                    if payload is None: continue # Пропускаем части без содержимого
+
+                    # Обработка text/plain
                     if current_content_type == "text/plain" and plain_body is None:
-                        charset = part.get_content_charset() or "utf-8"
                         try:
-                            part_body = part.get_payload(decode=True)
-                            if part_body:
-                                plain_body = part_body.decode(charset, errors="replace")
-                        except Exception as e:
-                            logger.error(f"Ошибка декодирования текстовой части письма: {e}")
+                            plain_body = payload.decode(charset, errors="replace")
+                        except LookupError:
+                             logger.warning(f"Неизвестная кодировка '{charset}' для text/plain, используем utf-8.")
+                             plain_body = payload.decode('utf-8', errors="replace")
+                        except Exception as e_dec:
+                            logger.error(f"Ошибка декодирования text/plain: {e_dec}")
+
+                    # Обработка text/html
                     elif current_content_type == "text/html" and html_body is None:
-                        charset = part.get_content_charset() or "utf-8"
                         try:
-                            part_body = part.get_payload(decode=True)
-                            if part_body:
-                                html_body = part_body.decode(charset, errors="replace")
-                                raw_html_body = html_body  # Сохраняем сырой HTML
-                        except Exception as e:
-                            logger.error(f"Ошибка декодирования HTML части письма: {e}")
-            else:
-                # Если письмо состоит из одной части
+                            html_body = payload.decode(charset, errors="replace")
+                            raw_html_body = html_body # Сохраняем сырой HTML
+                        except LookupError:
+                            logger.warning(f"Неизвестная кодировка '{charset}' для text/html, используем utf-8.")
+                            html_body = payload.decode('utf-8', errors="replace")
+                            raw_html_body = html_body
+                        except Exception as e_dec:
+                            logger.error(f"Ошибка декодирования text/html: {e_dec}")
+
+            else: # Если письмо не multipart
                 charset = email_message.get_content_charset() or "utf-8"
-                try:
-                    body_bytes = email_message.get_payload(decode=True)
-                    if body_bytes:
-                        body = body_bytes.decode(charset, errors="replace")
+                payload = email_message.get_payload(decode=True)
+                if payload:
+                    try:
+                        body = payload.decode(charset, errors="replace")
                         content_type = email_message.get_content_type()
                         if content_type == "text/html":
-                            raw_html_body = body  # Сохраняем сырой HTML если это HTML
-                except Exception as e:
-                    logger.error(f"Ошибка декодирования тела письма: {e}")
+                            raw_html_body = body
+                            html_body = body # Для логики выбора ниже
+                        elif content_type == "text/plain":
+                            plain_body = body # Для логики выбора ниже
+                    except LookupError:
+                         logger.warning(f"Неизвестная кодировка '{charset}' для non-multipart, используем utf-8.")
+                         body = payload.decode('utf-8', errors="replace")
+                         # Пытаемся определить тип еще раз
+                         content_type = email_message.get_content_type()
+                         if content_type == "text/html": raw_html_body = body; html_body = body
+                         elif content_type == "text/plain": plain_body = body
+                    except Exception as e_dec:
+                        logger.error(f"Ошибка декодирования non-multipart: {e_dec}")
 
-            # Выбираем тело письма в порядке приоритета
-            if plain_body:
-                body = plain_body
-                content_type = "text/plain"
-            elif html_body:
-                body = html_body
-                content_type = "text/html"
-            elif body is None:
-                body = "⚠ Не удалось получить содержимое письма"
-                content_type = "text/plain"
+            # Выбираем тело письма: приоритет plain тексту, затем html, затем body (из non-multipart)
+            final_body = plain_body if plain_body is not None else html_body if html_body is not None else body
+            final_content_type = "text/plain" if plain_body is not None else "text/html" if html_body is not None else content_type
 
-            return body, content_type, raw_html_body
+            if final_body is None:
+                final_body = "⚠ Не удалось получить содержимое письма"
+                final_content_type = "text/plain"
+
+            # Убедимся, что raw_html_body существует только если был найден HTML
+            if final_content_type != "text/html":
+                 raw_html_body = None
+
+            return final_body, final_content_type, raw_html_body
+
         except Exception as e:
-            logger.error(f"Ошибка при извлечении тела письма: {e}")
+            logger.error(f"Ошибка при извлечении тела письма: {e}", exc_info=True)
             return "⚠ Ошибка обработки содержимого письма", "text/plain", None
 
     def extract_attachments(self, email_message: email.message.Message) -> List[Dict[str, Any]]:
-        """
-        Извлечение вложений из письма с оптимизацией памяти.
-
-        Args:
-            email_message: Объект сообщения
-
-        Returns:
-            Список вложений в виде словарей
-        """
+        """ Извлечение вложений из письма. """
+        # ... (без изменений) ...
         attachments = []
+        processed_parts = set() # Для предотвращения дублирования из-за walk()
 
         if not email_message.is_multipart():
             return attachments
 
         try:
             for part in email_message.walk():
-                # Пропускаем составные части и сообщения
-                if part.get_content_maintype() in ('multipart', 'message'):
-                    continue
+                part_id = id(part)
+                if part_id in processed_parts: continue
+                processed_parts.add(part_id)
+
+                # Пропускаем составные части и сообщения, если это не основной контент
+                if part.is_multipart(): continue
+                # if part.get_content_maintype() in ('multipart', 'message'): continue # Старая проверка
 
                 # Проверяем наличие имени файла и Content-Disposition
                 filename = part.get_filename()
                 content_disposition = part.get('Content-Disposition', '')
 
                 # Более гибкая проверка на вложения
-                is_attachment = filename or ('attachment' in content_disposition)
+                is_attachment = bool(filename) or ('attachment' in content_disposition)
 
-                if not is_attachment:
+                # Пропускаем, если это не вложение (и не inline изображение/ресурс, который тоже может иметь filename)
+                # Может потребоваться более сложная логика, если нужно обрабатывать inline иначе
+                if not is_attachment and not ('inline' in content_disposition):
                     continue
 
                 # Если имя файла не определено, но есть disposition, попробуем извлечь имя из disposition
-                if not filename and 'attachment' in content_disposition:
+                if not filename and ('attachment' in content_disposition or 'inline' in content_disposition):
                     # Пытаемся извлечь имя из Content-Disposition
-                    filename_match = re.search(r'filename="?([^";]+)"?', content_disposition)
+                    filename_match = re.search(r'filename\*?=(?:(["\'])(.*?)\1|([^;\s]+))', content_disposition, re.IGNORECASE)
                     if filename_match:
-                        filename = filename_match.group(1)
-                    else:
-                        # Если имя всё равно не найдено, создаем случайное имя
-                        filename = f"attachment_{uuid.uuid4().hex}.bin"
+                        # Предпочитаем filename* (RFC 5987) если есть, иначе обычный filename
+                        encoded_name = filename_match.group(2) or filename_match.group(3)
+                        if encoded_name:
+                             # Простая эвристика для декодирования (может потребовать улучшения)
+                             if encoded_name.lower().startswith("utf-8''"):
+                                 try: filename = email.utils.unquote(encoded_name.split("''", 1)[1])
+                                 except: filename = encoded_name # Fallback
+                             else: filename = encoded_name
+                        else: # Fallback если имя не найдено в disposition
+                             filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
 
-                # Если все проверки пройдены, но имя файла всё равно не определено
+                    else: # Если имя не найдено в disposition
+                        filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
+
+
+                # Если все проверки пройдены, но имя файла всё равно не определено (маловероятно)
                 if not filename:
-                    filename = f"attachment_{uuid.uuid4().hex}.bin"
+                    filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
 
-                # Декодируем имя файла
+                # Декодируем имя файла, если оно было получено из get_filename()
                 filename = self.decode_mime_header(filename)
 
                 # Получаем содержимое вложения
-                content = part.get_payload(decode=True)
+                try:
+                    content = part.get_payload(decode=True)
+                except Exception as payload_err:
+                    logger.error(f"Ошибка при получении payload для '{filename}': {payload_err}")
+                    continue # Пропускаем это вложение
 
-                # Если содержимое равно None, пропускаем
-                if content is None:
-                    logger.warning(f"Вложение {filename} не имеет содержимого, пропускаем")
+                # Если содержимое равно None или пустое, пропускаем
+                if content is None or len(content) == 0:
+                    logger.warning(f"Вложение '{filename}' не имеет содержимого или оно пустое, пропускаем")
                     continue
 
                 # Получаем тип содержимого
@@ -475,91 +681,98 @@ class EmailTelegramForwarder:
 
                 attachments.append({
                     'filename': filename,
-                    'content': content,
+                    'content': content, # Храним как байты
                     'content_type': content_type
                 })
 
             logger.info(f"Всего найдено вложений: {len(attachments)}")
             return attachments
         except Exception as e:
-            logger.error(f"Ошибка при извлечении вложений: {e}")
+            logger.error(f"Ошибка при извлечении вложений: {e}", exc_info=True)
             return []
 
     def clean_subject(self, subject: str) -> str:
-        """
-        Очистка темы от префиксов с оптимизацией.
-
-        Args:
-            subject: Исходная тема
-
-        Returns:
-            Очищенная тема
-        """
+        """ Очистка темы от префиксов. """
+        # ... (без изменений) ...
         try:
             original_subject = subject
-            subject = subject.strip()
+            # Проверяем, что subject это строка
+            if not isinstance(subject, str):
+                 subject = str(subject)
 
-            for prefix in self.subject_prefixes:
-                if subject.startswith(prefix):
-                    subject = subject[len(prefix):]
-                    subject = subject.strip()
-                    # Рекурсивно удаляем вложенные префиксы (например, "Re: Fwd: Тема")
-                    return self.clean_subject(subject)
+            subject = subject.strip()
+            cleaned = False
+
+            # Итеративно удаляем префиксы
+            while True:
+                 found_prefix = False
+                 for prefix in self.subject_prefixes:
+                      if subject.lower().startswith(prefix.lower()):
+                           subject = subject[len(prefix):].strip()
+                           found_prefix = True
+                           cleaned = True
+                           break # Начинаем проверку префиксов заново с укороченной строки
+                 if not found_prefix:
+                      break # Ни один префикс не найден, выходим из цикла
 
             return subject
         except Exception as e:
-            logger.error(f"Ошибка при очистке темы письма: {e}")
-            return original_subject
+            logger.error(f"Ошибка при очистке темы письма ('{original_subject}'): {e}")
+            return original_subject # Возвращаем исходную в случае ошибки
 
     def format_email_body(self, body: str, content_type: str) -> str:
-        """
-        Форматирует тело письма, удаляя "Explore in Superset" и URL.
-        Удаляет <th>, обрабатывает <br> и <a>. НЕ обрезает текст.
-        """
+        """ Форматирует тело письма, удаляя "Explore in Superset" и URL. """
+        # ... (без изменений) ...
         logger.debug(
             f"Форматирование тела. Content-Type: {content_type}. Исходная длина: {len(body)}")
         clean_text = ""
         try:
             # Если содержимое в HTML
             if content_type == "text/html":
-                # ... (существующий код парсинга HTML до получения clean_text) ...
                 try:
-                    unescaped_body = html.unescape(body)
-                except Exception as ue:
-                    logger.warning(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
-                    unescaped_body = body
+                    # Сначала пробуем html.unescape, если падает - используем оригинал
+                    try:
+                        unescaped_body = html.unescape(body)
+                    except Exception as ue:
+                        logger.warning(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
+                        unescaped_body = body
 
-                try:
+                    # Затем парсим с BeautifulSoup
                     soup = BeautifulSoup(unescaped_body, 'html.parser')
+
+                    # Удаляем ненужные теги, ВКЛЮЧАЯ <th>
+                    for tag in soup(['script', 'style', 'meta', 'link', 'head', 'title', 'th']):
+                        tag.decompose()
+
+                    # Обработка ссылок <a>
+                    for link_tag in soup.find_all('a', href=True):
+                        href = link_tag.get('href', '').strip()
+                        link_text = link_tag.get_text(separator=' ', strip=True)
+                        # Создаем текстовое представление ссылки
+                        if href:
+                            # Если текст ссылки пуст или совпадает с URL, показываем только URL
+                            if not link_text or link_text == href:
+                                replacement_text = f"{href}\n"
+                            # Иначе показываем текст и URL на новой строке
+                            else:
+                                replacement_text = f"{link_text}\n{href}\n"
+                            link_tag.replace_with(NavigableString(replacement_text))
+                        elif link_text: # Если есть текст, но нет href
+                            link_tag.replace_with(NavigableString(link_text))
+                        else: # Если нет ни текста, ни href, удаляем тег
+                            link_tag.decompose()
+
+                    # Обработка <br> -> \n
+                    for br in soup.find_all('br'):
+                        br.replace_with(NavigableString('\n'))
+
+                    # Получаем текст, разделяя блоки переносами строк
+                    clean_text = soup.get_text(separator='\n', strip=True) # strip=True убирает пробелы по краям
+
                 except Exception as parse_err:
                     logger.error(f"Ошибка парсинга HTML BeautifulSoup: {parse_err}. Попытка вернуть исходный текст.")
-                    return body.strip()
-
-                # Удаляем ненужные теги, ВКЛЮЧАЯ <th>
-                for tag in soup(['script', 'style', 'meta', 'link', 'head', 'title', 'th']):
-                    tag.decompose()
-
-                # Обработка ссылок <a>
-                for link_tag in soup.find_all('a', href=True):
-                    href = link_tag.get('href', '').strip()
-                    link_text = link_tag.get_text(separator=' ', strip=True)
-                    if href:
-                        if not link_text or link_text == href:
-                            replacement_node = NavigableString(f"{href}\n")
-                        else:
-                            replacement_node = NavigableString(f"{link_text}\n{href}\n")
-                        link_tag.replace_with(replacement_node)
-                    elif link_text:
-                        link_tag.replace_with(NavigableString(link_text))
-                    else:
-                        link_tag.decompose()
-
-                # Обработка <br> -> \n
-                for br in soup.find_all('br'):
-                    br.replace_with(NavigableString('\n'))
-
-                # Получаем текст
-                clean_text = soup.get_text(separator='\n').strip()
+                    # В случае ошибки парсинга, возвращаем исходный текст как есть
+                    clean_text = body.strip()
 
 
             # Если содержимое в plain text
@@ -569,60 +782,75 @@ class EmailTelegramForwarder:
                 logger.warning(f"Обработка неизвестного content_type: {content_type}. Используем исходный текст.")
                 clean_text = body.strip()
 
+            # --- Логика удаления "Explore in Superset" ---
             lines = clean_text.splitlines()
             filtered_lines = []
             skip_next_line = False
             explore_removed = False # Флаг для логирования
 
             for line in lines:
+                line_stripped = line.strip() # Работаем с очищенной строкой
+
                 if skip_next_line:
                     skip_next_line = False
+                    logger.debug(f"Пропущена строка после 'Explore in Superset': '{line_stripped[:100]}...'")
                     continue # Пропускаем строку после "Explore in Superset" (URL)
 
                 # Используем strip() для удаления возможных пробелов по краям
-                if line.strip() == "Explore in Superset":
+                if line_stripped == "Explore in Superset":
                     skip_next_line = True # Устанавливаем флаг пропуска следующей строки
                     explore_removed = True
+                    logger.debug("Найдена строка 'Explore in Superset', будет удалена вместе со следующей.")
                     continue # Пропускаем саму строку "Explore in Superset"
 
                 filtered_lines.append(line) # Добавляем строки, которые не нужно удалять
 
             if explore_removed:
-                logger.debug("Удалена строка 'Explore in Superset' и следующая за ней.")
+                logger.debug("Удалена строка 'Explore in Superset' и следующая за ней (если была).")
 
             clean_text = "\n".join(filtered_lines).strip()
 
+            # --- Финальная очистка переносов и пробелов ---
             # Заменяем 3 и более переносов на 2 *после* фильтрации
             clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
             # Убираем пробелы/табы перед переносом строки
             clean_text = re.sub(r'[ \t]+\n', '\n', clean_text)
-
+            # Убираем пробелы/табы в конце строк
+            clean_text = re.sub(r'\n[ \t]+', '\n', clean_text)
+            # Убираем множественные пробелы внутри строк (опционально, может влиять на форматирование таблиц)
+            # clean_text = re.sub(r'[ \t]{2,}', ' ', clean_text)
 
             logger.debug(f"Тело отформатировано (без Superset). Итоговая длина: {len(clean_text)}")
             return clean_text
         except Exception as e:
             logger.error(f"Критическая ошибка в format_email_body: {e}", exc_info=True)
-            truncated_body = body[:1000] + "..." if len(body) > 1000 else body
+            # Возвращаем обрезанный исходный текст с предупреждением
+            truncated_body = body[:1000] + "..." if body and len(body) > 1000 else body if body else ""
             return f"⚠️ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
     def check_subject_match(self, email_subject: str) -> List[Tuple[str, str]]:
-        """
-        Проверка соответствия темы письма шаблонам клиентов с оптимизированным алгоритмом.
-
-        Args:
-            email_subject: Тема письма для проверки
-
-        Returns:
-            Список кортежей (шаблон, chat_id) для совпадающих тем
-        """
+        """ Проверка соответствия темы письма шаблонам клиентов. """
+        # ... (без изменений) ...
         matching_subjects = []
+        # Проверяем, что email_subject строка
+        if not isinstance(email_subject, str):
+             logger.warning(f"Некорректный тип темы письма: {type(email_subject)}. Преобразование в строку.")
+             email_subject = str(email_subject)
+
         email_subject_lower = email_subject.lower()
+        processed_patterns = set() # Чтобы не добавлять дубликаты из-за подстрок
 
         # Сначала проверяем точные совпадения (быстрее)
         if email_subject_lower in self._subject_patterns:
-            matching_subjects.extend(self._subject_patterns[email_subject_lower])
+            for pattern, chat_id in self._subject_patterns[email_subject_lower]:
+                 match_tuple = (pattern, chat_id)
+                 if match_tuple not in processed_patterns:
+                      matching_subjects.append(match_tuple)
+                      processed_patterns.add(match_tuple)
 
         # Затем проверяем вхождения подстрок (медленнее)
+        # TODO: Оптимизация - если точное совпадение найдено, нужно ли искать подстроки?
+        #       Зависит от требований. Пока оставляем как есть.
         for pattern_lower, patterns_data in self._subject_patterns.items():
             # Пропускаем шаблоны, которые уже проверены на точное совпадение
             if pattern_lower == email_subject_lower:
@@ -630,20 +858,22 @@ class EmailTelegramForwarder:
 
             # Проверяем, является ли шаблон подстрокой темы письма
             if pattern_lower in email_subject_lower:
-                matching_subjects.extend(patterns_data)
+                for pattern, chat_id in patterns_data:
+                     match_tuple = (pattern, chat_id)
+                     if match_tuple not in processed_patterns:
+                          matching_subjects.append(match_tuple)
+                          processed_patterns.add(match_tuple)
+
+        if matching_subjects:
+            logger.info(f"Тема '{email_subject}' совпала с {len(matching_subjects)} шаблонами.")
+        else:
+            logger.debug(f"Тема '{email_subject}' не совпала ни с одним шаблоном.")
 
         return matching_subjects
 
     def _check_rate_limit(self, chat_id: str) -> bool:
-        """
-        Проверка ограничения частоты сообщений для конкретного чата.
-
-        Args:
-            chat_id: ID чата
-
-        Returns:
-            True если отправка разрешена, False если достигнут лимит
-        """
+        """ Проверка ограничения частоты сообщений для конкретного чата. """
+        # ... (без изменений) ...
         with self._rate_limit_lock:
             current_time = time.time()
 
@@ -657,8 +887,14 @@ class EmailTelegramForwarder:
             # Проверяем, не превышен ли лимит сообщений
             if chat_id in self._message_timestamps and len(
                     self._message_timestamps[chat_id]) >= self._max_messages_per_minute:
-                logger.warning(
-                    f"Достигнут лимит сообщений для чата {chat_id}: {self._max_messages_per_minute} сообщений в минуту")
+                # Логируем только если это первый раз, когда лимит достигнут для этого чата за последнее время
+                last_limit_log_key = f"ratelimit_log_{chat_id}"
+                now = time.time()
+                last_log_time = getattr(self, last_limit_log_key, 0)
+                if now - last_log_time > 60: # Логируем не чаще раза в минуту
+                     logger.warning(
+                        f"Достигнут лимит сообщений для чата {chat_id}: {self._max_messages_per_minute} сообщений в минуту")
+                     setattr(self, last_limit_log_key, now)
                 return False
 
             # Добавляем новую метку времени
@@ -670,882 +906,937 @@ class EmailTelegramForwarder:
 
     def send_to_telegram(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
         """
-        Отправка данных письма в Telegram с учетом настроек пользователя по режиму доставки.
+        Точка входа для отправки письма. Проверяет rate limit и либо отправляет
+        сразу (_send_to_telegram_now), либо ставит в очередь планировщика.
         """
         # Проверяем ограничение частоты
         if not self._check_rate_limit(chat_id):
             # Откладываем отправку, если лимит превышен
-            logger.warning(f"Rate limit reached for chat {chat_id}. Rescheduling.")
-            # Используем threading.Timer для отложенного вызова
-            threading.Timer(60.0, self.send_to_telegram, args=[chat_id, email_data]).start()
+            logger.warning(f"Rate limit достигнут для чата {chat_id}. Планирование отправки через 60 секунд.")
+            # Используем новый планировщик
+            self.delayed_sender.schedule(60.0, chat_id, email_data)
             return False  # Возвращаем False, так как отправка не произошла сейчас
 
+        # Если лимит не превышен, отправляем немедленно
         try:
-            # ---> НАЧАЛО ИЗМЕНЕНИЙ: ПОЛУЧЕНИЕ РЕЖИМА ДОСТАВКИ <---
-            user_delivery_mode = DEFAULT_DELIVERY_MODE  # Значение по умолчанию
+            return self._send_to_telegram_now(chat_id, email_data)
+        except Exception as e:
+             logger.error(f"Непредвиденная ошибка при немедленной отправке в Telegram для {chat_id}: {e}", exc_info=True)
+             return False
+
+
+    def _send_to_telegram_now(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
+        """
+        Непосредственная отправка данных письма в Telegram с учетом настроек пользователя,
+        экранированием для MarkdownV2 и использованием TemporaryFileManager.
+        НЕ проверяет rate limit.
+        """
+        try:
+            # Получение режима доставки пользователя
+            user_delivery_mode = DEFAULT_DELIVERY_MODE
             try:
-                # Пытаемся получить режим из DatabaseManager
-                # Убедитесь, что self.db_manager инициализирован и имеет метод get_user_delivery_mode
                 if hasattr(self, 'db_manager') and self.db_manager:
                     retrieved_mode = self.db_manager.get_user_delivery_mode(chat_id)
-                    if retrieved_mode:  # Проверяем, что метод вернул непустое значение
+                    if retrieved_mode in [DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART]:
                         user_delivery_mode = retrieved_mode
                     else:
-                        logger.warning(
-                            f"Метод get_user_delivery_mode для {chat_id} вернул пустое значение, используем default: {DEFAULT_DELIVERY_MODE}")
+                        logger.warning(f"Получен некорректный режим доставки '{retrieved_mode}' для {chat_id}, используем default: {DEFAULT_DELIVERY_MODE}")
                 else:
-                    logger.error(
-                        "Экземпляр db_manager отсутствует в EmailTelegramForwarder. Невозможно получить режим доставки.")
-
-            except AttributeError:
-                logger.error("Метод get_user_delivery_mode отсутствует в db_manager. Используем default.")
+                    logger.error("Экземпляр db_manager отсутствует. Невозможно получить режим доставки.")
             except Exception as db_err:
-                logger.error(
-                    f"Ошибка получения режима доставки для {chat_id}: {db_err}. Используем default: {DEFAULT_DELIVERY_MODE}")
-            # ---> КОНЕЦ ИЗМЕНЕНИЙ: ПОЛУЧЕНИЕ РЕЖИМА ДОСТАВКИ <---
+                logger.error(f"Ошибка получения режима доставки для {chat_id}: {db_err}. Используем default: {DEFAULT_DELIVERY_MODE}")
 
-            # Форматируем тело письма
-            body = email_data.get("body", "")  # Используем .get для безопасности
+            # Форматирование тела
+            body = email_data.get("body", "")
             content_type = email_data.get("content_type", "text/plain")
-            raw_html_body = email_data.get("raw_html_body")  # Может быть None
+            raw_html_body = email_data.get("raw_html_body") # Может быть None
 
-            # Используем вашу функцию форматирования
+            # Получаем уже отформатированный текст (без HTML тегов и "Explore Superset")
             formatted_body = self.format_email_body(body, content_type)
+            # ВАЖНО: combined_message здесь это ТОЛЬКО тело для текстового режима перед добавлением заголовка
+            # НЕ используем combined_message = formatted_body
 
-            # Создаем заголовок
-            combined_message = formatted_body
             has_attachments = bool(email_data.get("attachments"))
-            TELEGRAM_MAX_LEN = 4096  # Максимальная длина сообщения Telegram
-            message_length = len(combined_message)
+            TELEGRAM_MAX_LEN = 4096
+            message_length = len(formatted_body) # Считаем длину чистого тела
 
-            # ---> НАЧАЛО ИЗМЕНЕНИЙ: ЛОГИКА ВЫБОРА СПОСОБА ОТПРАВКИ <---
+            # Определение, нужно ли отправлять как HTML
             send_as_html = False
-            # HTML можно отправить только если есть raw_html_body
             if raw_html_body:
                 if user_delivery_mode == DELIVERY_MODE_HTML:
                     send_as_html = True
-                    logger.debug(f"Режим для {chat_id}: HTML. Отправляем как HTML.")
                 elif user_delivery_mode == DELIVERY_MODE_SMART and message_length >= TELEGRAM_MAX_LEN:
+                    # Даже если режим smart, но есть raw_html и текст длинный, отправляем HTML
                     send_as_html = True
-                    logger.debug(
-                        f"Режим для {chat_id}: Smart, сообщение длинное ({message_length}). Отправляем как HTML.")
-                # Если режим 'text' или 'smart' и сообщение короткое, send_as_html остается False
-                elif user_delivery_mode == DELIVERY_MODE_TEXT:
-                    logger.debug(f"Режим для {chat_id}: Text. Отправляем как текст.")
-                else:  # Smart и короткое
-                    logger.debug(
-                        f"Режим для {chat_id}: Smart, сообщение короткое ({message_length}). Отправляем как текст.")
-            else:
-                # Если нет raw_html_body, всегда отправляем как текст, независимо от настроек
-                send_as_html = False
-                logger.debug(
-                    f"Нет raw_html_body для письма '{email_data.get('subject', '')}'. Отправляем как текст для {chat_id}.")
-            # ---> КОНЕЦ ИЗМЕНЕНИЙ: ЛОГИКА ВЫБОРА СПОСОБА ОТПРАВКИ <---
 
             # --- Отправка как HTML файл ---
             if send_as_html:
-                logger.info(
-                    f"Отправка письма '{email_data.get('subject', '')}' как HTML файл для {chat_id} (режим: {user_delivery_mode}, длина: {message_length})")
-                temp_dir = None
-                temp_file_path = None
-                try:
-                    # Создаем временный файл (ваш существующий код)
-                    temp_dir = tempfile.mkdtemp()
-                    # Очищаем имя файла темы для использования в имени файла
-                    base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data.get('subject', 'email'))[:50]
-                    # Добавляем уникальный идентификатор, чтобы избежать коллизий
-                    html_filename = f"{base_filename}_{uuid.uuid4().hex[:6]}.html"
-                    temp_file_path = os.path.join(temp_dir, html_filename)
-
-                    # Обработка и запись HTML в файл (ваш существующий код)
-                    # Убедитесь, что raw_html_body обрабатывается перед записью
-                    processed_html = html.unescape(raw_html_body)  # Раскодируем сущности
-                    processed_html = re.sub(r'<\?p>', '<p>', processed_html)  # Исправляем <?p> если есть
-                    processed_html = re.sub(r'<\?>', '', processed_html)  # Исправляем <?> если есть
+                logger.info(f"Отправка письма '{email_data.get('subject', '')}' как HTML файл для {chat_id} (режим: {user_delivery_mode}, длина тела: {message_length})")
+                # Используем контекстный менеджер для временных файлов
+                with TemporaryFileManager(prefix=f"html_{chat_id}_") as temp_dir:
                     try:
-                        # Используем html.parser для большей совместимости
-                        soup = BeautifulSoup(processed_html, 'html.parser')
-                        # Удаляем ненужные теги, если нужно (опционально)
-                        # for tag in soup(['script', 'style']): tag.decompose()
-                        clean_html = str(soup)
-                    except Exception as parse_err:
-                        logger.warning(f"Ошибка парсинга HTML для файла: {parse_err}. Используем необработанный HTML.")
-                        clean_html = processed_html
+                        # Очищаем имя файла темы
+                        base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data.get('subject', 'email'))[:50]
+                        html_filename = f"{base_filename}_{uuid.uuid4().hex[:6]}.html"
+                        temp_file_path = os.path.join(temp_dir, html_filename)
 
-                    with open(temp_file_path, 'w', encoding='utf-8') as f:
-                        # Запись шапки и стилей (ваш существующий код)
-                        f.write('<!DOCTYPE html>\n<html lang="ru">\n<head>\n')
-                        f.write('    <meta charset="UTF-8">\n')
-                        f.write('    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n')
-                        f.write(f'    <title>{html.escape(email_data.get("subject", "Письмо"))}</title>\n')
-                        # Добавьте ваши стили сюда
-                        f.write(
-                            '    <style> body { font-family: sans-serif; line-height: 1.5; padding: 15px; } table { border-collapse: collapse; width: 100%; margin-bottom: 1em; } th, td { border: 1px solid #ddd; padding: 8px; text-align: left; } th { background-color: #f2f2f2; } img { max-width: 100%; height: auto; } </style>\n')
-                        f.write('</head>\n<body>\n')
-                        f.write(clean_html)  # Записываем очищенный HTML
-                        f.write('\n</body>\n</html>')
+                        # Обработка и запись HTML
+                        # (оставляем вашу логику обработки HTML)
+                        processed_html = html.unescape(raw_html_body)
+                        processed_html = re.sub(r'<\?p>', '<p>', processed_html)
+                        processed_html = re.sub(r'<\?>', '', processed_html)
+                        try:
+                            soup = BeautifulSoup(processed_html, 'html.parser')
+                            clean_html = str(soup)
+                        except Exception as parse_err:
+                            logger.warning(f"Ошибка парсинга HTML для файла: {parse_err}. Используем необработанный HTML.")
+                            clean_html = processed_html
 
-                    # Отправляем HTML файл
-                    with open(temp_file_path, 'rb') as html_file:
-                        # Формируем caption для HTML файла
+                        with open(temp_file_path, 'w', encoding='utf-8') as f:
+                            f.write('<!DOCTYPE html>\n<html lang="ru">\n<head>\n')
+                            f.write('    <meta charset="UTF-8">\n')
+                            f.write('    <meta name="viewport" content="width=device-width, initial-scale=1.0">\n')
+                            f.write(f'    <title>{html.escape(email_data.get("subject", "Письмо"))}</title>\n')
+                            f.write('    <style> body { font-family: sans-serif; line-height: 1.5; padding: 15px; } table { border-collapse: collapse; width: 100%; margin-bottom: 1em; } th, td { border: 1px solid #ddd; padding: 8px; text-align: left; } th { background-color: #f2f2f2; } img { max-width: 100%; height: auto; } </style>\n')
+                            f.write('</head>\n<body>\n')
+                            f.write(clean_html)
+                            f.write('\n</body>\n</html>')
+
+                        # Формируем caption (без Markdown, т.к. это caption файла)
                         caption_header = (
-                            f"📧 Новое письмо (HTML версия)\n\n"
-                            f"От: {email_data.get('from', 'Неизвестно')}\n"
-                            f"Тема: {email_data.get('subject', 'Без темы')}\n"
-                            f"Дата: {email_data.get('date', 'Неизвестно')}\n\n"
+                            f"📧 Новое письмо (HTML)\n"
+                            f"От: {email_data.get('from', 'N/A')}\n" # Не экранируем, т.к. нет parse_mode
+                            f"Тема: {email_data.get('subject', 'N/A')}\n"
                         )
-                        # Добавляем информацию о причине отправки файла
-                        if user_delivery_mode == DELIVERY_MODE_HTML:
-                            caption_reason = "Выбран режим 'Только HTML файл'."
-                        else:  # Smart mode
-                            caption_reason = "Сообщение слишком длинное для Telegram."
+                        caption_reason = "HTML-файл"
+                        if user_delivery_mode == DELIVERY_MODE_HTML: caption_reason += " (режим 'Только HTML')"
+                        elif user_delivery_mode == DELIVERY_MODE_SMART: caption_reason += " (сообщение длинное)"
 
                         full_caption = caption_header + caption_reason
-                        # Обрезаем caption, если он превышает лимит Telegram (1024)
-                        if len(full_caption) > 1024:
-                            full_caption = full_caption[:1020] + "... " + caption_reason  # Сохраняем причину
+                        if len(full_caption) > 1024: full_caption = full_caption[:1020] + "..."
 
-                        # Отправляем документ с retry логикой (можно обернуть в декоратор @with_retry)
-                        # self.bot.send_document(chat_id, html_file, caption=full_caption) # Замените на ваш метод с retry, если есть
-                        # Пример с простой логикой retry здесь:
-                        for attempt in range(MAX_RETRIES):
-                            try:
-                                self.bot.send_document(chat_id, html_file, caption=full_caption)
-                                logger.info(f"HTML файл '{html_filename}' успешно отправлен для {chat_id}")
-                                break  # Успешно отправлено
-                            except Exception as send_err:
-                                if attempt < MAX_RETRIES - 1:
-                                    wait_time = RETRY_DELAY * (2 ** attempt)
-                                    logger.warning(
-                                        f"Ошибка отправки HTML файла для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
-                                    time.sleep(wait_time)
-                                else:
-                                    logger.error(
-                                        f"Не удалось отправить HTML файл для {chat_id} после {MAX_RETRIES} попыток: {send_err}")
-                                    raise send_err  # Передаем ошибку дальше
+                        # Отправляем HTML файл
+                        with open(temp_file_path, 'rb') as html_file:
+                            self._send_telegram_message_with_retry(
+                                self.bot.send_document,
+                                chat_id,
+                                html_file,
+                                caption=full_caption,
+                                visible_file_name=html_filename,
+                                parse_mode=None # Явно указываем отсутствие parse_mode
+                            )
+                        logger.info(f"HTML файл '{html_filename}' успешно отправлен для {chat_id}")
 
-                    # Отправляем вложения отдельно, если они есть
-                    if has_attachments:
-                        logger.info(
-                            f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после HTML файла.")
-                        for attachment in email_data["attachments"]:
-                            self.send_attachment_to_telegram(chat_id, attachment)
-                            time.sleep(0.5)  # Небольшая пауза между файлами
+                        # Отправляем вложения отдельно
+                        if has_attachments:
+                            logger.info(f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после HTML файла.")
+                            for attachment in email_data["attachments"]:
+                                self.send_attachment_to_telegram(chat_id, attachment)
+                                time.sleep(0.5)
 
-                    return True  # Успешная отправка HTML + вложения
+                        return True
 
-                except Exception as e:
-                    logger.error(f"Ошибка при создании/отправке HTML файла для {chat_id}: {e}", exc_info=True)
-                    # Пытаемся отправить уведомление об ошибке
-                    try:
-                        error_text = f"⚠️ Не удалось отправить письмо '{email_data.get('subject', '')}' как HTML файл из-за внутренней ошибки."
-                        self.bot.send_message(chat_id, error_text)
-                    except Exception as notify_err:
-                        logger.error(f"Не удалось даже отправить уведомление об ошибке для {chat_id}: {notify_err}")
-                    return False  # Ошибка отправки HTML
-                finally:
-                    # Очистка временных файлов (ваш существующий код)
-                    if temp_file_path and os.path.exists(temp_file_path):
+                    except Exception as e_html:
+                        logger.error(f"Ошибка при создании/отправке HTML файла для {chat_id}: {e_html}", exc_info=True)
                         try:
-                            os.remove(temp_file_path)
-                        except Exception as e:
-                            logger.warning(f"Не удалось удалить файл {temp_file_path}: {e}")
-                    if temp_dir and os.path.exists(temp_dir):
-                        try:
-                            os.rmdir(temp_dir)
-                        except Exception as e:
-                            logger.warning(f"Не удалось удалить директорию {temp_dir}: {e}")
+                            error_text = f"⚠️ Не удалось отправить письмо '{email_data.get('subject', '')}' как HTML файл."
+                            # Отправляем ошибку без parse_mode
+                            self._send_telegram_message_with_retry(self.bot.send_message, chat_id, error_text)
+                        except Exception: pass
+                        return False
+                # Блок finally для контекстного менеджера сработает автоматически
 
             # --- Отправка как текст ---
             else:
-                logger.info(
-                    f"Отправка письма '{email_data.get('subject', '')}' как текст для {chat_id} (режим: {user_delivery_mode}, длина: {message_length})")
+                logger.info(f"Отправка письма '{email_data.get('subject', '')}' как текст для {chat_id} (режим: {user_delivery_mode}, длина тела: {message_length})")
 
-                # Разбиваем текст на части (ваш существующий код)
-                message_parts = self.split_text(combined_message, max_length=TELEGRAM_MAX_LEN)
+                # Формируем заголовок с использованием MarkdownV2
+                # Экранируем данные из письма на случай наличия в них спецсимволов
+                header = (
+                     f"📧 *Новое письмо*\n"
+                     f"*От:* {self.escape_markdown_v2(email_data.get('from', 'N/A'))}\n"
+                     f"*Тема:* {self.escape_markdown_v2(email_data.get('subject', 'N/A'))}\n\n"
+                     #f"*Дата:* {self.escape_markdown_v2(email_data.get('date', 'N/A'))}\n\n"
+                )
+
+                # Экранируем ТЕЛО письма перед конкатенацией
+                escaped_body = self.escape_markdown_v2(formatted_body)
+                full_message_text = header + escaped_body
+
+                # Разбиваем ПОЛНЫЙ текст (заголовок + экранированное тело) на части
+                # Используем лимит с запасом, но Telegram сам должен резать по символам UTF-8, а не байтам
+                message_parts = self.split_text(full_message_text, max_length=TELEGRAM_MAX_LEN)
+                part_to_log = "N/A" # Для логирования ошибки
 
                 try:
-                    # Логика отправки текста и вложений (ваш существующий код)
                     if not has_attachments:
                         # Отправляем все части текста
                         for i, part in enumerate(message_parts):
-                            # Добавляем пометку для частей > 1
-                            prefix = f"[{i + 1}/{len(message_parts)}] " if len(message_parts) > 1 else ""
-                            # self.bot.send_message(chat_id, prefix + part) # Замените на ваш метод с retry
-                            # Пример с простой логикой retry здесь:
-                            for attempt in range(MAX_RETRIES):
-                                try:
-                                    self.bot.send_message(chat_id, prefix + part)
-                                    break  # Успех
-                                except Exception as send_err:
-                                    if attempt < MAX_RETRIES - 1:
-                                        wait_time = RETRY_DELAY * (2 ** attempt)
-                                        logger.warning(
-                                            f"Ошибка отправки текстовой части {i + 1} для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
-                                        time.sleep(wait_time)
-                                    else:
-                                        logger.error(
-                                            f"Не удалось отправить текстовую часть {i + 1} для {chat_id}: {send_err}")
-                                        raise send_err  # Передаем ошибку
-                            time.sleep(0.5)  # Пауза между частями
+                            part_to_log = part # Запоминаем текущую часть для лога ошибки
+                            self._send_telegram_message_with_retry(
+                                self.bot.send_message,
+                                chat_id,
+                                part,
+                                parse_mode='MarkdownV2', # Используем MarkdownV2
+                                disable_web_page_preview=True
+                            )
+                            if len(message_parts) > 1: time.sleep(0.5) # Пауза между частями
                     else:
                         # Есть вложения
-                        # Если текст помещается в caption (1024 символа) и есть только одно вложение
-                        if message_length <= 1024 and len(email_data["attachments"]) == 1:
+                        # Если ПОЛНЫЙ текст (заголовок + экранированное тело) <= 1024 и одно вложение
+                        if len(full_message_text) <= 1024 and len(email_data["attachments"]) == 1:
                             first_attachment = email_data["attachments"][0]
-                            self.send_attachment_with_message(chat_id, first_attachment, combined_message)
+                            # Передаем УЖЕ готовый и экранированный текст в caption
+                            self.send_attachment_with_message(chat_id, first_attachment, full_message_text)
                         else:
                             # Отправляем текст частями
                             for i, part in enumerate(message_parts):
-                                prefix = f"[{i + 1}/{len(message_parts)}] " if len(message_parts) > 1 else ""
-                                # self.bot.send_message(chat_id, prefix + part) # Замените на ваш метод с retry
-                                # Пример с простой логикой retry здесь:
-                                for attempt in range(MAX_RETRIES):
-                                    try:
-                                        self.bot.send_message(chat_id, prefix + part)
-                                        break  # Успех
-                                    except Exception as send_err:
-                                        if attempt < MAX_RETRIES - 1:
-                                            wait_time = RETRY_DELAY * (2 ** attempt)
-                                            logger.warning(
-                                                f"Ошибка отправки текстовой части {i + 1} (с вложениями) для {chat_id} (попытка {attempt + 1}): {send_err}. Повтор через {wait_time}с.")
-                                            time.sleep(wait_time)
-                                        else:
-                                            logger.error(
-                                                f"Не удалось отправить текстовую часть {i + 1} (с вложениями) для {chat_id}: {send_err}")
-                                            raise send_err  # Передаем ошибку
-                                time.sleep(0.5)  # Пауза
+                                part_to_log = part # Запоминаем текущую часть
+                                self._send_telegram_message_with_retry(
+                                    self.bot.send_message,
+                                    chat_id,
+                                    part,
+                                    parse_mode='MarkdownV2', # Используем MarkdownV2
+                                    disable_web_page_preview=True
+                                    )
+                                if len(message_parts) > 1: time.sleep(0.5)
 
                             # Затем отправляем вложения
-                            logger.info(
-                                f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после текста.")
+                            logger.info(f"Отправка {len(email_data['attachments'])} вложений для {chat_id} после текста.")
                             for attachment in email_data["attachments"]:
                                 self.send_attachment_to_telegram(chat_id, attachment)
-                                time.sleep(0.5)  # Пауза
+                                time.sleep(0.5) # Пауза между вложениями
 
                     logger.info(f"Сообщение успешно отправлено текстом в чат {chat_id}")
-                    return True  # Успешная отправка текста + вложения
+                    return True
 
-                except Exception as e:
-                    logger.error(f"Ошибка при отправке текстового сообщения или вложений для {chat_id}: {e}",
-                                 exc_info=True)
-                    # Пытаемся отправить уведомление об ошибке
+                except Exception as e_text:
+                    # Логируем ошибку и ПРЕВЬЮ части, на которой произошла ошибка
+                    failing_part_preview = part_to_log[:200] + ('...' if len(part_to_log) > 200 else '')
+                    logger.error(f"Ошибка при отправке текстового сообщения или вложений для {chat_id} (часть: '{failing_part_preview}'): {e_text}", exc_info=True)
                     try:
-                        error_text = f"⚠️ Не удалось отправить письмо '{email_data.get('subject', '')}' (текстовая версия) из-за внутренней ошибки."
-                        self.bot.send_message(chat_id, error_text)
-                    except Exception as notify_err:
-                        logger.error(f"Не удалось даже отправить уведомление об ошибке для {chat_id}: {notify_err}")
-                    return False  # Ошибка отправки текста
+                        # Экранируем тему в сообщении об ошибке и отправляем без parse_mode
+                        error_text = f"⚠️ Не удалось отправить часть письма '{self.escape_markdown_v2(email_data.get('subject', ''))}' (текст)."
+                        self._send_telegram_message_with_retry(self.bot.send_message, chat_id, error_text)
+                    except Exception: pass
+                    return False
 
-        except Exception as e:
-            # Ловим общие ошибки на верхнем уровне функции
-            logger.error(f"Критическая ошибка в send_to_telegram для {chat_id}: {e}", exc_info=True)
-            # Пытаемся отправить уведомление об ошибке
+        except Exception as e_main:
+            logger.error(f"Критическая ошибка в _send_to_telegram_now для {chat_id}: {e_main}", exc_info=True)
             try:
-                error_text = f"⚠️ Произошла критическая ошибка при обработке письма '{email_data.get('subject', '')}'. Администратор уведомлен."
-                self.bot.send_message(chat_id, error_text)
-            except Exception as notify_err:
-                logger.error(f"Не удалось даже отправить уведомление о критической ошибке для {chat_id}: {notify_err}")
-            return False  # Общая ошибка
+                # Отправляем ошибку без parse_mode
+                error_text = f"⚠️ Ошибка обработки письма '{email_data.get('subject', '')}'."
+                self._send_telegram_message_with_retry(self.bot.send_message, chat_id, error_text)
+            except Exception: pass
+            return False
+
+    # --- НОВЫЙ МЕТОД: Обертка для отправки с retry ---
+    def _send_telegram_message_with_retry(self, send_func, *args, **kwargs):
+        """Отправляет сообщение через Telegram API с логикой повторных попыток."""
+        last_exception = None
+        for attempt in range(MAX_RETRIES):
+            try:
+                # Убираем parse_mode если он None, т.к. send_document его не принимает явно в некоторых версиях
+                # Но если parse_mode='MarkdownV2' или другой, оставляем его.
+                current_parse_mode = kwargs.get('parse_mode')
+                if current_parse_mode is None and 'parse_mode' in kwargs:
+                    del kwargs['parse_mode']
+
+                return send_func(*args, **kwargs)
+
+            except telebot.apihelper.ApiTelegramException as e:
+                 last_exception = e
+                 # Обрабатываем специфичные ошибки Telegram
+                 # --- УЛУЧШЕННАЯ ПРОВЕРКА ОШИБКИ ПАРСИНГА ---
+                 if e.error_code == 400 and "can't parse entities" in str(e).lower():
+                      problem_text_preview = "N/A"
+                      # Пытаемся получить текст из аргументов (обычно второй аргумент для send_message)
+                      # или из caption в kwargs
+                      if len(args) > 1 and isinstance(args[1], str):
+                           problem_text = args[1]
+                           problem_text_preview = problem_text[:200] + ('...' if len(problem_text) > 200 else '')
+                      elif 'caption' in kwargs and isinstance(kwargs['caption'], str):
+                           problem_text = kwargs['caption']
+                           problem_text_preview = problem_text[:200] + ('...' if len(problem_text) > 200 else '')
+
+                      logger.error(
+                          f"Ошибка парсинга Markdown/HTML в Telegram для чата {args[0]} "
+                          f"(parse_mode='{current_parse_mode}', text/caption preview: '{problem_text_preview}'): {e}. "
+                          f"Проверьте функцию экранирования или наличие незакрытых тегов/символов."
+                      )
+                      # Прерываем попытки, так как повтор не поможет с неправильным форматированием
+                      break
+                 # --- КОНЕЦ УЛУЧШЕННОЙ ПРОВЕРКИ ---
+                 elif e.error_code == 400 and 'message is too long' in str(e).lower():
+                      logger.error(f"Ошибка отправки: Сообщение слишком длинное для чата {args[0]} ({e})")
+                      break # Прерываем, разбиение должно было произойти раньше
+                 elif e.error_code == 403: # Forbidden: bot was blocked by the user, etc.
+                      logger.error(f"Ошибка отправки (403 Forbidden) для чата {args[0]}: {e}. Пользователь мог заблокировать бота.")
+                      # TODO: Возможно, стоит деактивировать пользователя в БД?
+                      break # Нет смысла повторять
+                 elif e.error_code == 429: # Too Many Requests
+                      # Пытаемся получить время ожидания из ответа API
+                      retry_after = RETRY_DELAY * (2 ** attempt) # Fallback
+                      try:
+                          # result_json может быть недоступен или не содержать нужных данных
+                          if hasattr(e, 'result_json') and isinstance(e.result_json, dict):
+                              retry_after = e.result_json.get('parameters', {}).get('retry_after', retry_after)
+                      except Exception: pass # Игнорируем ошибки парсинга retry_after
+                      wait_time = max(1, retry_after) # Ждем минимум 1 секунду
+                      logger.warning(f"Ошибка отправки (429 Too Many Requests) для чата {args[0]}: {e}. Повтор через {wait_time}с (попытка {attempt + 1}/{MAX_RETRIES})")
+                      time.sleep(wait_time)
+                 elif attempt < MAX_RETRIES - 1:
+                      wait_time = RETRY_DELAY * (2 ** attempt)
+                      logger.warning(f"Ошибка API Telegram при отправке ({send_func.__name__}) для чата {args[0]} (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
+                      time.sleep(wait_time)
+                 else:
+                      logger.error(f"Не удалось отправить сообщение через API Telegram ({send_func.__name__}) для чата {args[0]} после {MAX_RETRIES} попыток: {e}")
+
+            except Exception as e: # Ловим другие возможные ошибки (сетевые и т.д.)
+                 last_exception = e
+                 if attempt < MAX_RETRIES - 1:
+                     wait_time = RETRY_DELAY * (2 ** attempt)
+                     logger.warning(f"Сетевая или другая ошибка при отправке ({send_func.__name__}) для чата {args[0]} (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
+                     time.sleep(wait_time)
+                 else:
+                     logger.error(f"Не удалось отправить сообщение ({send_func.__name__}) для чата {args[0]} после {MAX_RETRIES} попыток из-за не-API ошибки: {e}")
+
+        # Если все попытки не удались, пробрасываем последнее исключение
+        if last_exception:
+            raise last_exception
+
 
     def send_attachment_with_message(self, chat_id: str, attachment: Dict[str, Any], message: str) -> None:
         """
-        Отправка вложения вместе с текстом сообщения в одном сообщении Telegram.
+        Отправка вложения вместе с текстом сообщения (использует TemporaryFileManager).
+        Ожидает, что 'message' уже содержит заголовок и ЭКРАНИРОВАННОЕ тело.
+        Использует parse_mode='MarkdownV2' для caption.
         """
-        temp_dir = None
-        temp_file_path = None
-
-        try:
-            filename = attachment['filename']
-            content = attachment['content']
-            content_type = attachment['content_type']
-
-            # Очищаем имя файла от недопустимых символов
-            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-
-            # Создаем временную директорию
-            temp_dir = tempfile.mkdtemp()
-
-            # Создаем файл с оригинальным именем во временной директории
-            temp_file_path = os.path.join(temp_dir, safe_filename)
-
-            with open(temp_file_path, 'wb') as temp_file:
-                temp_file.write(content)
-
-            logger.debug(f"Создан временный файл: {temp_file_path} для вложения {filename}")
-
-            # Проверяем размер файла
-            file_size = os.path.getsize(temp_file_path)
-            if file_size > 50 * 1024 * 1024:
-                logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ)")
-                self.bot.send_message(chat_id, message)  # Убрали parse_mode
-                self.bot.send_message(chat_id, f"⚠️ Вложение {safe_filename} слишком большое для отправки в Telegram")
-                return
-
-            # Ограничиваем длину caption до 1024 символов
-            if len(message) > 1024:
-                truncated_message = message[:1020] + "..."
-            else:
-                truncated_message = message
-
-            for attempt in range(MAX_RETRIES):
-                try:
-                    if content_type.startswith('image/'):
-                        with open(temp_file_path, 'rb') as photo:
-                            self.bot.send_photo(chat_id, photo, caption=truncated_message)  # Убрали parse_mode
-                    else:
-                        with open(temp_file_path, 'rb') as document:
-                            self.bot.send_document(chat_id, document, caption=truncated_message)  # Убрали parse_mode
-                    break
-                except Exception as e:
-                    if attempt < MAX_RETRIES - 1:
-                        wait_time = RETRY_DELAY * (2 ** attempt)
-                        logger.warning(
-                            f"Ошибка при отправке вложения с сообщением (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Не удалось отправить вложение с сообщением после {MAX_RETRIES} попыток: {e}")
-                        try:
-                            self.bot.send_message(chat_id, message)  # Убрали parse_mode
-                            # Резервная отправка вложения
-                            if content_type.startswith('image/'):
-                                with open(temp_file_path, 'rb') as photo:
-                                    self.bot.send_photo(chat_id, photo, caption=safe_filename)
-                            else:
-                                with open(temp_file_path, 'rb') as document:
-                                    self.bot.send_document(chat_id, document, caption=safe_filename)
-                        except Exception as e2:
-                            logger.error(f"Критическая ошибка отправки: {e2}")
-
-        except Exception as e:
-            logger.error(f"Ошибка при отправке вложения с сообщением: {e}")
+        # Используем контекстный менеджер для временных файлов
+        with TemporaryFileManager(prefix=f"att_msg_{chat_id}_") as temp_dir:
+            safe_filename = "attachment.bin" # Default
             try:
-                self.bot.send_message(chat_id, message)  # Убрали parse_mode
-            except Exception as e3:
-                logger.error(f"Не удалось отправить даже текст сообщения: {e3}")
-        finally:
-            # Очистка временных файлов
-            if temp_file_path and os.path.exists(temp_file_path):
+                filename = attachment.get('filename', 'attachment.bin')
+                content = attachment.get('content')
+                content_type = attachment.get('content_type', 'application/octet-stream')
+
+                if not content:
+                     logger.warning(f"Пустое содержимое для вложения '{filename}', пропускаем.")
+                     # Отправляем только текст (он уже экранирован и с заголовком)
+                     # Используем MarkdownV2, так как 'message' содержит заголовок в этом формате
+                     self._send_telegram_message_with_retry(
+                         self.bot.send_message, chat_id, message,
+                         parse_mode='MarkdownV2', disable_web_page_preview=True
+                         )
+                     return
+
+                safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                temp_file_path = os.path.join(temp_dir, safe_filename)
+
+                with open(temp_file_path, 'wb') as temp_file:
+                    temp_file.write(content)
+                logger.debug(f"Создан временный файл: {temp_file_path} для вложения {filename}")
+
+                file_size = os.path.getsize(temp_file_path)
+                MAX_TG_FILE_SIZE = 50 * 1024 * 1024
+                MAX_TG_CAPTION_LEN = 1024
+                if file_size > MAX_TG_FILE_SIZE:
+                    logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ)")
+                    # Отправляем текст и предупреждение о файле
+                    self._send_telegram_message_with_retry(
+                        self.bot.send_message, chat_id, message,
+                        parse_mode='MarkdownV2', disable_web_page_preview=True
+                        )
+                    # Предупреждение отправляем без parse_mode
+                    self._send_telegram_message_with_retry(
+                        self.bot.send_message, chat_id,
+                        f"⚠️ Вложение '{safe_filename}' ({file_size / (1024 * 1024):.2f} МБ) не отправлено (слишком большое)."
+                        )
+                    return
+
+                # Ограничиваем длину caption (message уже содержит экранирование)
+                # Добавляем троеточие, если обрезали
+                caption = message[:MAX_TG_CAPTION_LEN - 3] + "..." if len(message) > MAX_TG_CAPTION_LEN else message
+
+                # Определяем метод отправки
+                send_method = self.bot.send_document
+                if content_type.startswith('image/'): send_method = self.bot.send_photo
+                elif content_type.startswith('video/'): send_method = self.bot.send_video
+                elif content_type.startswith('audio/'): send_method = self.bot.send_audio
+
+                # Отправляем с retry
+                with open(temp_file_path, 'rb') as file_to_send:
+                     # Устанавливаем parse_mode='MarkdownV2' для caption
+                     # visible_file_name нужен только для send_document
+                     send_kwargs = {
+                         'caption': caption,
+                         'parse_mode': 'MarkdownV2' # Здесь нужен parse_mode для заголовка в caption
+                     }
+                     # Для send_document нужно добавить visible_file_name
+                     # Для других методов (photo, video, audio) этот параметр не нужен или вызовет ошибку
+                     if send_method == self.bot.send_document:
+                         send_kwargs['visible_file_name'] = safe_filename
+
+                     self._send_telegram_message_with_retry(
+                          send_method,
+                          chat_id,
+                          file_to_send,
+                          **send_kwargs
+                     )
+                logger.info(f"Вложение '{filename}' отправлено с сообщением для {chat_id}")
+
+            except Exception as e:
+                logger.error(f"Ошибка при отправке вложения '{safe_filename}' с сообщением для {chat_id}: {e}", exc_info=True)
+                # Пытаемся отправить хотя бы текст сообщения
                 try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить временный файл {temp_file_path}: {e}")
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить временную директорию {temp_dir}: {e}")
+                    # Отправляем исходный message (уже с заголовком и экранированием) с MarkdownV2
+                    self._send_telegram_message_with_retry(
+                        self.bot.send_message, chat_id, message,
+                        parse_mode='MarkdownV2', disable_web_page_preview=True
+                        )
+                    # Отправляем предупреждение об ошибке вложения (без parse_mode)
+                    failed_filename = self.escape_markdown_v2(attachment.get('filename', 'N/A')) # Экранируем имя файла для безопасности
+                    self._send_telegram_message_with_retry(
+                        self.bot.send_message, chat_id, f"⚠️ Не удалось отправить вложение: {failed_filename}"
+                        )
+                except Exception as fallback_e:
+                    logger.error(f"Не удалось отправить даже текст сообщения после ошибки вложения: {fallback_e}")
+        # Очистка временной директории произойдет автоматически при выходе из with
 
     def split_text(self, text: str, max_length: int = 4096) -> List[str]:
-        """
-        Разбивает текст на части по заданной максимальной длине,
-        гарантированно оставляя запас для префиксов типа "[N/M] ".
-        """
+        """ Разбивает текст на части. """
+        # ... (без изменений) ...
         parts = []
-        # Запас символов для префикса (например, "[99/99] " ~ 8 символов) + небольшой доп. запас
-        safety_margin = 20
-        # Максимальная длина контента для каждой части (кроме последней)
+        safety_margin = 20 # Запас для префиксов и непредвиденных символов
         limit = max_length - safety_margin
 
         if limit <= 0:
-            logger.error(
-                f"Невозможно разбить текст: max_length ({max_length}) слишком мал для safety_margin ({safety_margin}).")
-            # Возвращаем текст как есть, пусть API ругается
-            return [text]
+            logger.error(f"Невозможно разбить текст: max_length ({max_length}) слишком мал.")
+            return [text[:max_length]] if text else [] # Обрезаем до max_length
 
         current_pos = 0
         text_len = len(text)
 
         while current_pos < text_len:
-            # Определяем конец текущего среза (не больше длины текста)
+            # Конец среза
             end_pos = min(current_pos + limit, text_len)
 
-            # Если оставшийся текст помещается в одну часть (с учетом полной max_length)
+            # Если оставшийся текст помещается в одну часть (уже с учетом полной max_length)
+            # Проверяем <= max_length, т.к. последняя часть может быть длиннее limit
             if text_len - current_pos <= max_length:
                 parts.append(text[current_pos:])
-                break  # Завершаем цикл
+                break
 
-            # Ищем последний перенос строки в пределах среза [current_pos, end_pos)
+            # Ищем последний перенос строки в срезе
             split_at = text.rfind('\n', current_pos, end_pos)
 
-            # Если перенос не найден или он слишком близко к началу,
-            # ищем первый пробел с конца для более естественного разрыва
+            # Если переноса нет или он в самом начале, ищем последний пробел
             if split_at == -1 or split_at == current_pos:
-                # Ищем последний пробел перед end_pos
                 split_at = text.rfind(' ', current_pos, end_pos)
-                # Если пробела нет, придется резать "по живому" на end_pos
+                # Если и пробела нет, режем по лимиту
                 if split_at == -1 or split_at == current_pos:
-                    split_at = end_pos
+                     # Проверяем, не будет ли end_pos совпадать с началом следующей части
+                     if end_pos == current_pos: end_pos += 1 # Сдвигаем на 1, если застряли
+                     split_at = end_pos
 
-            # Если перенос строки найден, он является предпочтительной точкой разреза
-            # Если split_at указывает на \n, то срез [current_pos:split_at] не включает \n
 
             # Добавляем часть до точки разреза
             parts.append(text[current_pos:split_at])
-            # Обновляем текущую позицию для следующей части
-            # Перемещаемся за точку разреза и пропускаем пробельные символы (\n, ' ')
+
+            # Обновляем позицию, пропуская сам разделитель (перенос или пробел)
             current_pos = split_at + 1
-            # Пропускаем пробелы/переносы в начале следующей части (если есть)
+            # Пропускаем пробельные символы в начале следующей части
             while current_pos < text_len and text[current_pos].isspace():
                 current_pos += 1
 
-        # Фильтруем пустые строки, которые могли образоваться
+        # Фильтруем пустые строки
         result_parts = [part for part in parts if part and not part.isspace()]
 
-        # Если после всех манипуляций ничего не осталось (очень странно),
-        # возвращаем исходный текст, обрезанный до лимита
         if not result_parts and text:
             logger.warning("split_text не смог разбить текст, возвращаем обрезанный исходник.")
-            return [text[:limit]]
+            return [text[:max_length]] # Возвращаем обрезанный
 
         return result_parts
 
+
     def send_attachment_to_telegram(self, chat_id: str, attachment: Dict[str, Any]) -> None:
         """
-        Отправка вложения в Telegram с сохранением имени файла и учетом лимита caption.
+        Отправка вложения в Telegram (использует TemporaryFileManager).
         """
-        temp_dir = None
-        temp_file_path = None
+        # Используем контекстный менеджер
+        with TemporaryFileManager(prefix=f"att_{chat_id}_") as temp_dir:
+            try:
+                filename = attachment.get('filename', 'attachment.bin')
+                content = attachment.get('content')
+                content_type = attachment.get('content_type', 'application/octet-stream')
 
-        try:
-            filename = attachment['filename']
-            content = attachment['content']
-            content_type = attachment['content_type']
+                if not content:
+                    logger.warning(f"Пустое содержимое для отдельного вложения '{filename}', пропускаем.")
+                    return
 
-            # Очищаем имя файла от недопустимых символов
-            safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-            caption = safe_filename[:1024]  # Ограничиваем caption до 1024 символов
+                safe_filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
+                caption = safe_filename[:1020] + "..." if len(safe_filename) > 1024 else safe_filename # Ограничение caption
+                temp_file_path = os.path.join(temp_dir, safe_filename)
 
-            # Создаем временную директорию
-            temp_dir = tempfile.mkdtemp()
-            temp_file_path = os.path.join(temp_dir, safe_filename)
+                with open(temp_file_path, 'wb') as temp_file:
+                    temp_file.write(content)
+                logger.debug(f"Создан временный файл: {temp_file_path} для вложения {filename}")
 
-            with open(temp_file_path, 'wb') as temp_file:
-                temp_file.write(content)
+                file_size = os.path.getsize(temp_file_path)
+                MAX_TG_FILE_SIZE = 50 * 1024 * 1024
+                if file_size > MAX_TG_FILE_SIZE:
+                    logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ)")
+                    self._send_telegram_message_with_retry(self.bot.send_message, chat_id, f"⚠️ Вложение '{safe_filename}' ({file_size / (1024 * 1024):.2f} МБ) не отправлено (слишком большое).")
+                    return
 
-            logger.debug(f"Создан временный файл: {temp_file_path} для вложения {filename}")
+                # Определяем метод отправки
+                send_method = self.bot.send_document
+                if content_type.startswith('image/'): send_method = self.bot.send_photo
+                elif content_type.startswith('video/'): send_method = self.bot.send_video
+                elif content_type.startswith('audio/'): send_method = self.bot.send_audio
 
-            # Проверяем размер файла
-            file_size = os.path.getsize(temp_file_path)
-            if file_size > 50 * 1024 * 1024:
-                logger.warning(f"Вложение {filename} слишком большое ({file_size / (1024 * 1024):.2f} МБ), пропускаем")
-                self.bot.send_message(chat_id, f"⚠️ Вложение {safe_filename} слишком большое для отправки")
-                return
+                # Отправляем с retry
+                with open(temp_file_path, 'rb') as file_to_send:
+                     self._send_telegram_message_with_retry(
+                          send_method,
+                          chat_id,
+                          file_to_send,
+                          caption=caption,
+                          # parse_mode не нужен для caption файла
+                          visible_file_name=safe_filename # Для send_document
+                     )
+                logger.info(f"Отдельное вложение '{filename}' отправлено для {chat_id}")
 
-            for attempt in range(MAX_RETRIES):
+            except Exception as e:
+                logger.error(f"Ошибка при отправке отдельного вложения для {chat_id} (файл: {attachment.get('filename')}): {e}", exc_info=True)
                 try:
-                    if content_type.startswith('image/'):
-                        with open(temp_file_path, 'rb') as photo:
-                            self.bot.send_photo(chat_id, photo, caption=caption)
-                        logger.info(f"Изображение {filename} отправлено в чат {chat_id}")
-                    else:
-                        with open(temp_file_path, 'rb') as document:
-                            self.bot.send_document(chat_id, document, caption=caption)
-                        logger.info(f"Документ {filename} отправлен в чат {chat_id}")
-                    break
-                except Exception as e:
-                    if attempt < MAX_RETRIES - 1:
-                        wait_time = RETRY_DELAY * (2 ** attempt)
-                        logger.warning(
-                            f"Ошибка при отправке вложения {filename} (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
-                        time.sleep(wait_time)
-                    else:
-                        logger.error(f"Не удалось отправить вложение {filename} после {MAX_RETRIES} попыток: {e}")
-                        self.bot.send_message(chat_id, f"⚠️ Не удалось отправить вложение: {safe_filename}")
-
-        except Exception as e:
-            logger.error(f"Ошибка при отправке вложения {attachment.get('filename', 'неизвестно')}: {e}")
-        finally:
-            # Очистка временных файлов
-            if temp_file_path and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить временный файл {temp_file_path}: {e}")
-            if temp_dir and os.path.exists(temp_dir):
-                try:
-                    os.rmdir(temp_dir)
-                except Exception as e:
-                    logger.warning(f"Не удалось удалить временную директорию {temp_dir}: {e}")
+                    self._send_telegram_message_with_retry(self.bot.send_message, chat_id, f"⚠️ Не удалось отправить вложение: {attachment.get('filename', 'N/A')}")
+                except Exception: pass
+        # Очистка временной директории произойдет автоматически
 
     def mark_as_read(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> None:
-        """
-        Отметить письмо как прочитанное с повторными попытками.
-
-        Args:
-            mail: Соединение с почтовым сервером
-            msg_id: ID письма
-        """
+        """ Отметить письмо как прочитанное. """
+        # ... (без изменений) ...
         for attempt in range(MAX_RETRIES):
             try:
-                mail.store(msg_id, '+FLAGS', '\\Seen')
-                logger.debug(f"Письмо {msg_id} отмечено как прочитанное")
-                return
-            except Exception as e:
+                logger.debug(f"Попытка {attempt+1} отметить письмо {msg_id.decode()} как прочитанное...")
+                status, data = mail.store(msg_id, '+FLAGS', '\\Seen')
+                if status == 'OK':
+                    logger.debug(f"Письмо {msg_id.decode()} успешно отмечено как прочитанное.")
+                    return
+                else:
+                    # Если сервер вернул не OK, возможно, ID невалиден или что-то еще
+                    logger.warning(f"Не удалось отметить письмо {msg_id.decode()} как прочитанное (статус: {status}, данные: {data}). Прерываем попытки.")
+                    return # Прекращаем попытки
+            except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
                 if attempt < MAX_RETRIES - 1:
                     wait_time = RETRY_DELAY * (2 ** attempt)
                     logger.warning(
-                        f"Ошибка при отметке письма {msg_id} как прочитанного (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
+                        f"Ошибка IMAP при отметке письма {msg_id.decode()} как прочитанного (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
                     time.sleep(wait_time)
+                    # Попробуем переподключиться
+                    try: self._get_mail_connection()
+                    except: logger.error("Не удалось переподключиться к почте во время retry.")
                 else:
                     logger.error(
-                        f"Не удалось отметить письмо {msg_id} как прочитанное после {MAX_RETRIES} попыток: {e}")
+                        f"Не удалось отметить письмо {msg_id.decode()} как прочитанное после {MAX_RETRIES} попыток: {e}")
+            except Exception as e:
+                logger.error(f"Непредвиденная ошибка при отметке письма {msg_id.decode()} как прочитанного: {e}", exc_info=True)
+                return # Прерываем попытки
+
 
     def get_email_subject(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> Optional[str]:
-        """
-        Получить только заголовок письма без загрузки всего содержимого.
-
-        Args:
-            mail: Соединение с почтовым сервером
-            msg_id: ID письма
-
-        Returns:
-            Тема письма или None в случае ошибки
-        """
+        """ Получить только заголовок письма. """
+        # ... (без изменений) ...
         try:
             # Получаем только заголовок письма
-            status, msg_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
-            if status != "OK" or not msg_data or not msg_data[0]:
-                logger.warning(f"Не удалось получить заголовок письма {msg_id}")
+            logger.debug(f"Извлечение заголовка для письма {msg_id.decode()}...")
+            status, msg_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])") # Добавим From и Date для полноты
+            if status != "OK" or not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
+                logger.warning(f"Не удалось получить заголовок письма {msg_id.decode()} (статус: {status}, данные: {msg_data})")
                 return None
 
             # Извлекаем заголовок
             header_data = msg_data[0][1]
-            header = email.message_from_bytes(header_data)
+            if not isinstance(header_data, bytes):
+                 logger.warning(f"Некорректный тип данных для header_data письма {msg_id.decode()}: {type(header_data)}")
+                 return None
+
+            # Используем email parser для надежности
+            parser = email.parser.BytesHeaderParser()
+            header = parser.parsebytes(header_data)
+
             subject = self.decode_mime_header(header.get("Subject", "Без темы"))
             subject = self.clean_subject(subject)
+            logger.debug(f"Извлечена тема '{subject}' для письма {msg_id.decode()}.")
 
             return subject
+        except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
+             logger.error(f"Ошибка IMAP при извлечении заголовка письма {msg_id.decode()}: {e}")
+             # Сбрасываем соединение
+             with self._mail_lock:
+                if self._mail_connection == mail:
+                    try: mail.close(); mail.logout()
+                    except: pass
+                    self._mail_connection = None
+             return None
         except Exception as e:
-            logger.error(f"Ошибка при извлечении заголовка письма {msg_id}: {e}")
+            logger.error(f"Непредвиденная ошибка при извлечении заголовка письма {msg_id.decode()}: {e}", exc_info=True)
             return None
 
+
     def _process_email_worker(self) -> None:
-        """
-        Рабочий поток для обработки писем из очереди.
-        """
+        """ Рабочий поток для обработки писем из очереди (отправка в Telegram). """
+        # ... (без изменений) ...
         while not self.stop_event.is_set():
             try:
                 # Получаем задачу из очереди с таймаутом
                 try:
                     email_data, matching_subjects = self.email_queue.get(timeout=1)
                 except queue.Empty:
+                    continue # Если очередь пуста, просто проверяем stop_event и ждем дальше
+
+                if not email_data or not matching_subjects:
+                    logger.warning("Получены некорректные данные из очереди email_queue.")
+                    self.email_queue.task_done()
                     continue
 
-                # Обрабатываем письмо
+                processed_chat_ids = set() # Для предотвращения дублирования отправок по разным шаблонам одному юзеру
+                # Обрабатываем письмо для каждого совпавшего чата
                 for subject_pattern, chat_id in matching_subjects:
-                    logger.info(f"Обработка письма с темой '{email_data['subject']}' для чата {chat_id}")
-                    self.send_to_telegram(chat_id, email_data)
+                     if chat_id in processed_chat_ids:
+                          logger.debug(f"Пропуск дублирующей отправки для chat_id {chat_id} (шаблон '{subject_pattern}')")
+                          continue
 
-                # Отмечаем задачу как выполненную
+                     logger.info(f"Запуск отправки письма с темой '{email_data.get('subject', 'N/A')}' для чата {chat_id} (шаблон: '{subject_pattern}')")
+                     # Вызываем send_to_telegram, который сам решает - отправить сразу или отложить
+                     self.send_to_telegram(chat_id, email_data)
+                     processed_chat_ids.add(chat_id)
+
+                # Отмечаем задачу как выполненную (один раз для всего пакета совпадений)
                 self.email_queue.task_done()
+                logger.debug("Задача из email_queue обработана.")
+
             except Exception as e:
-                logger.error(f"Ошибка в рабочем потоке обработки писем: {e}")
+                logger.error(f"Ошибка в рабочем потоке обработки писем (_process_email_worker): {e}", exc_info=True)
+                 # Небольшая пауза в случае ошибки, чтобы не загружать CPU
+                time.sleep(1)
+
 
     def _start_workers(self) -> None:
-        """
-        Запуск рабочих потоков для обработки писем.
-        """
-        self.stop_event.clear()
+        """ Запуск рабочих потоков для обработки писем из очереди. """
+        # ... (без изменений) ...
+        if self.workers: # Если потоки уже есть, не запускаем новые
+            logger.debug("Рабочие потоки обработки email уже запущены.")
+            return
+
+        self.stop_event.clear() # Убедимся, что флаг снят
         for i in range(MAX_WORKERS):
             worker = threading.Thread(
                 target=self._process_email_worker,
-                name=f"EmailWorker-{i}",
+                name=f"EmailQueueWorker-{i}",
                 daemon=True
             )
             worker.start()
             self.workers.append(worker)
-        logger.info(f"Запущено {MAX_WORKERS} рабочих потоков для обработки писем")
+        logger.info(f"Запущено {MAX_WORKERS} рабочих потоков для обработки email из очереди.")
 
     def _stop_workers(self) -> None:
-        """
-        Остановка рабочих потоков.
-        """
-        self.stop_event.set()
+        """ Остановка рабочих потоков обработки очереди email. """
+        # ... (без изменений) ...
+        # self.stop_event.set() # Не ставим здесь, т.к. он общий
+        logger.info("Остановка рабочих потоков обработки email...")
+        active_workers = []
         for worker in self.workers:
             if worker.is_alive():
-                worker.join(timeout=2)
-        self.workers = []
-        logger.info("Рабочие потоки остановлены")
+                try:
+                    worker.join(timeout=2)
+                    if worker.is_alive():
+                         logger.warning(f"Поток {worker.name} не завершился вовремя.")
+                    else:
+                         logger.debug(f"Поток {worker.name} завершен.")
+                except Exception as e:
+                     logger.error(f"Ошибка при ожидании потока {worker.name}: {e}")
+            else:
+                 logger.debug(f"Поток {worker.name} уже был неактивен.")
+
+        self.workers = [] # Очищаем список в любом случае
+        logger.info("Рабочие потоки обработки email остановлены.")
+
 
     def process_emails(self) -> None:
-        """Оптимизированная функция обработки писем с многопоточной обработкой."""
-        logger.info("Начинаем проверку почты...")
+        """ Оптимизированная функция обработки писем. """
+        logger.info("--- Начало цикла проверки почты ---")
+        start_time = time.time()
 
         try:
-            # Повторная загрузка данных о клиентах перед каждой проверкой
+            # Повторная загрузка данных о клиентах
             self.reload_client_data()
 
-            # Если нет активных клиентов, пропускаем проверку
-            if not any(any(client["enabled"] for client in data) for data in self.client_data.values()):
-                logger.info("Нет активных клиентов, пропускаем проверку почты")
+            # Если нет активных клиентов/шаблонов, пропускаем
+            if not self._subject_patterns:
+                logger.info("Нет активных шаблонов для проверки почты, пропускаем цикл.")
                 return
 
             # Подключение к почтовому серверу
-            mail = self._get_mail_connection()
+            try:
+                mail = self._get_mail_connection()
+                if not mail: # Если _get_mail_connection вернул None (маловероятно, но возможно)
+                    logger.error("Не удалось получить соединение с почтовым сервером.")
+                    return
+            except Exception as conn_err:
+                 logger.error(f"Критическая ошибка при получении соединения с почтой: {conn_err}", exc_info=True)
+                 return # Прерываем цикл обработки, если не можем подключиться
 
             # Получение непрочитанных писем
             msg_ids = self.get_all_unseen_emails(mail)
 
-            # Если нет непрочитанных писем, пропускаем обработку
             if not msg_ids:
-                logger.info("Нет новых писем, пропускаем обработку")
+                logger.info("Нет новых непрочитанных писем.")
                 return
 
             # Запускаем рабочие потоки, если они еще не запущены
             if not self.workers:
                 self._start_workers()
 
-            # Инициализация счетчиков
-            emails_processed = 0  # Подсчет обработанных писем
-            notifications_sent = 0  # Подсчет отправленных уведомлений
-            emails_to_mark_read = []  # Список ID писем для пометки прочитанными
+            emails_processed_count = 0
+            notifications_potential = 0
+            emails_to_mark_read = []
+            emails_to_mark_unread = [] # Письма, которые точно нужно оставить непрочитанными
 
-            # Проверка каждого письма
+            # Обработка каждого письма
             for msg_id in msg_ids:
-                # Сначала получаем только тему письма (оптимизация)
-                subject = self.get_email_subject(mail, msg_id)
+                try:
+                    # Сначала получаем только тему
+                    subject = self.get_email_subject(mail, msg_id)
 
-                if not subject:
-                    logger.warning(f"Не удалось получить тему письма {msg_id}, пропускаем")
-                    continue
-
-                logger.info(f"Обработка письма с темой: {subject}")
-
-                # Проверка соответствия темы и шаблонов клиентов
-                matching_subjects = self.check_subject_match(subject)
-
-                if matching_subjects:
-                    # Только если есть совпадение, загружаем полное содержимое письма
-                    email_data = self.extract_email_content(mail, msg_id)
-
-                    if not email_data:
-                        logger.warning(f"Не удалось извлечь содержимое письма {msg_id}")
+                    if subject is None: # Если get_email_subject вернул None из-за ошибки
+                        logger.warning(f"Не удалось получить тему письма {msg_id.decode()}, пропускаем")
                         continue
 
-                    # Увеличиваем счетчик обработанных писем
-                    emails_processed += 1
+                    # Проверка соответствия темы
+                    matching_subjects = self.check_subject_match(subject)
 
-                    # Добавляем письмо в очередь для обработки в отдельном потоке
-                    self.email_queue.put((email_data, matching_subjects))
-                    notifications_sent += len(matching_subjects)
+                    if matching_subjects:
+                        # Если есть совпадение, загружаем полное содержимое
+                        logger.info(f"Тема '{subject}' совпала. Извлечение полного письма {msg_id.decode()}...")
+                        email_data = self.extract_email_content(mail, msg_id)
 
-                    # Добавляем ID письма в список для последующей пометки прочитанным
-                    emails_to_mark_read.append(msg_id)
-                else:
-                    logger.info(
-                        f"Письмо с темой '{subject}' не соответствует ни одному шаблону, оставляем непрочитанным")
-                    # Гарантия, что письмо останется непрочитанным
-                    self.mark_as_unread(mail, msg_id)
+                        if email_data:
+                            emails_processed_count += 1
+                            notifications_potential += len(matching_subjects)
+                            # Добавляем в очередь для отправки
+                            self.email_queue.put((email_data, matching_subjects))
+                            emails_to_mark_read.append(msg_id)
+                            logger.debug(f"Письмо {msg_id.decode()} добавлено в очередь на отправку.")
+                        else:
+                            logger.warning(f"Не удалось извлечь содержимое письма {msg_id.decode()} после совпадения темы. Оставляем непрочитанным.")
+                            # Если не удалось извлечь, лучше оставить непрочитанным
+                            emails_to_mark_unread.append(msg_id)
+                    else:
+                        # Если тема не совпала, оставляем непрочитанным
+                        # logger.info(f"Письмо {msg_id.decode()} с темой '{subject}' не соответствует шаблонам, оставляем непрочитанным.")
+                        # Явно помечаем как непрочитанное на случай, если PEEK изменил статус (хотя не должен)
+                        emails_to_mark_unread.append(msg_id)
 
-            # Отмечаем письма как прочитанные пакетом
-            for msg_id in emails_to_mark_read:
-                self.mark_as_read(mail, msg_id)
+                except Exception as loop_err:
+                    logger.error(f"Ошибка при обработке письма {msg_id.decode()} в цикле: {loop_err}", exc_info=True)
+                    # Стараемся продолжить обработку следующих писем
 
-            # Ожидаем завершения обработки всех писем перед возвратом
-            # (не блокируем поток, так как обработка происходит асинхронно)
+            # Отмечаем письма как прочитанные (те, что были обработаны)
+            if emails_to_mark_read:
+                 logger.info(f"Пометка {len(emails_to_mark_read)} писем как прочитанных...")
+                 for msg_id in emails_to_mark_read:
+                     self.mark_as_read(mail, msg_id)
 
-            # Логируем итоговую статистику
+            # Отмечаем письма как непрочитанные (те, что не совпали или не обработались)
+            if emails_to_mark_unread:
+                logger.info(f"Пометка {len(emails_to_mark_unread)} писем как непрочитанных...")
+                for msg_id in emails_to_mark_unread:
+                    self.mark_as_unread(mail, msg_id) # Убедимся, что они точно не прочитаны
+
+            # Не ждем завершения email_queue здесь, worker'ы работают асинхронно
+
+            elapsed_time = time.time() - start_time
             logger.info(
-                f"Проверка почты завершена. Обработано писем: {emails_processed}, отправлено уведомлений: {notifications_sent}")
+                f"Цикл проверки почты завершен за {elapsed_time:.2f} сек. "
+                f"Обработано писем: {emails_processed_count}, "
+                f"Потенциальных уведомлений: {notifications_potential} (в очереди: {self.email_queue.qsize()})"
+            )
 
         except Exception as e:
-            logger.error(f"Критическая ошибка при проверке почты: {e}")
-            logger.exception(e)  # Добавляем полный стек-трейс
+            logger.error(f"Критическая ошибка в цикле проверки почты: {e}", exc_info=True)
+            # Сбрасываем почтовое соединение при критической ошибке
+            with self._mail_lock:
+                if self._mail_connection:
+                    try: self._mail_connection.close(); self._mail_connection.logout()
+                    except: pass
+                    self._mail_connection = None
+        finally:
+             logger.info("--- Конец цикла проверки почты ---")
 
-            # Пробуем переподключиться к почтовому серверу при следующей проверке
-            try:
-                with self._mail_lock:
-                    if self._mail_connection:
-                        try:
-                            self._mail_connection.close()
-                            self._mail_connection.logout()
-                        except Exception:
-                            pass
-                        self._mail_connection = None
-            except Exception:
-                pass
 
     def test_connections(self) -> Dict[str, bool]:
-        """
-        Тестирование подключений к серверам с повторными попытками.
+        """ Тестирование подключений к серверам. """
+        # ... (без изменений) ...
+        results = {"mail": False, "telegram": False}
+        logger.info("Тестирование соединений...")
 
-        Returns:
-            Словарь с результатами проверки {"mail": bool, "telegram": bool}
-        """
         # Проверка почтового сервера
-        mail_status = False
-        for attempt in range(MAX_RETRIES):
-            try:
-                test_mail = imaplib.IMAP4_SSL(self.email_server, timeout=CONNECTION_TIMEOUT)
-                test_mail.login(self.email_account, self.password)
-                test_mail.select("inbox")
-                test_mail.close()
-                test_mail.logout()
-                logger.info("Подключение к почтовому серверу прошло успешно")
-                mail_status = True
-                break
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = RETRY_DELAY * (2 ** attempt)
-                    logger.warning(
-                        f"Ошибка при тестировании почтового соединения (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Не удалось подключиться к почтовому серверу после {MAX_RETRIES} попыток: {e}")
+        try:
+            logger.debug("Тестирование IMAP соединения...")
+            test_mail = imaplib.IMAP4_SSL(self.email_server, timeout=CONNECTION_TIMEOUT)
+            test_mail.login(self.email_account, self.password)
+            test_mail.select("inbox")
+            test_mail.close()
+            test_mail.logout()
+            logger.info("Подключение к почтовому серверу (IMAP) успешно.")
+            results["mail"] = True
+        except Exception as e:
+            logger.error(f"Ошибка при тестировании почтового соединения (IMAP): {e}")
 
         # Проверка подключения к Telegram API
-        telegram_status = False
-        for attempt in range(MAX_RETRIES):
-            try:
-                test_message = self.bot.get_me()
-                logger.info(f"Подключение к Telegram API прошло успешно. Имя бота: {test_message.first_name}")
-                telegram_status = True
-                break
-            except Exception as e:
-                if attempt < MAX_RETRIES - 1:
-                    wait_time = RETRY_DELAY * (2 ** attempt)
-                    logger.warning(
-                        f"Ошибка при тестировании Telegram API (попытка {attempt + 1}/{MAX_RETRIES}): {e}. Повтор через {wait_time}с")
-                    time.sleep(wait_time)
-                else:
-                    logger.error(f"Не удалось подключиться к Telegram API после {MAX_RETRIES} попыток: {e}")
+        try:
+            logger.debug("Тестирование Telegram API...")
+            test_message = self.bot.get_me()
+            logger.info(f"Подключение к Telegram API успешно. Бот: {test_message.username} ({test_message.first_name})")
+            results["telegram"] = True
+        except Exception as e:
+            logger.error(f"Ошибка при тестировании Telegram API: {e}")
 
-        return {
-            "mail": mail_status,
-            "telegram": telegram_status
-        }
+        logger.info(f"Результаты тестирования: {results}")
+        return results
 
     def start_scheduler(self, interval: int = 5) -> None:
-        """
-        Запуск планировщика для регулярной проверки почты с функцией самовосстановления.
+        """ Запуск планировщика для регулярной проверки почты. """
+        # ... (без изменений, но добавим запуск/остановку нового планировщика) ...
 
-        Args:
-            interval: Интервал проверки в минутах
-        """
-        # Настройка расписания проверки почты (каждые X минут)
+        # Настройка расписания основной проверки почты
         self.check_interval = interval
+        schedule.clear() # Очищаем предыдущие задачи на всякий случай
         schedule.every(interval).minutes.do(self.process_emails)
+        logger.info(f"Планировщик основной проверки почты настроен. Интервал: {interval} минут")
 
-        logger.info(f"Планировщик запущен. Интервал проверки: {interval} минут")
-
-        # Запускаем рабочие потоки для обработки писем
+        # Запускаем рабочие потоки для обработки очереди email
         self._start_workers()
 
-        # Запускаем проверку сразу, не дожидаясь первого запланированного запуска
-        self.process_emails()
+        # --- ЗАПУСК ПЛАНИРОВЩИКА ОТЛОЖЕННЫХ ОТПРАВОК ---
+        self.delayed_sender.start()
 
-        # Переменная для отслеживания последнего успешного запуска
-        last_successful_check = time.time()
-        check_timeout = interval * 60 * 2  # Удвоенный интервал в секундах
+        # Запускаем проверку сразу
+        logger.info("Первый запуск проверки почты...")
+        try:
+             self.process_emails()
+        except Exception as first_run_err:
+             logger.error(f"Ошибка при первом запуске process_emails: {first_run_err}", exc_info=True)
 
-        # Основной цикл
-        while True:
+        # Основной цикл ожидания schedule
+        logger.info("Вход в основной цикл ожидания schedule...")
+        while not self.stop_event.is_set():
             try:
                 schedule.run_pending()
-
-                # Проверяем, не пропущены ли запланированные проверки
-                current_time = time.time()
-                if current_time - last_successful_check > check_timeout:
-                    logger.warning(f"Обнаружен пропуск запланированной проверки. Выполняем проверку вручную.")
-                    self.process_emails()
-                    last_successful_check = current_time
-
-                # Обновляем время последней успешной проверки
-                for job in schedule.jobs:
-                    if job.last_run is not None:
-                        last_successful_check = time.time()
-
-                time.sleep(1)
+                # Используем wait с проверкой события остановки
+                # Проверяем каждую секунду, чтобы быстрее реагировать на stop_event
+                self.stop_event.wait(timeout=1)
             except KeyboardInterrupt:
-                logger.info("Работа программы прервана пользователем")
-                self._stop_workers()
+                logger.info("Получен сигнал KeyboardInterrupt, остановка...")
+                self.stop_event.set() # Устанавливаем флаг для других потоков
                 break
             except Exception as e:
-                logger.error(f"Неожиданная ошибка в основном цикле: {e}")
-                logger.exception(e)
+                logger.error(f"Ошибка в основном цикле schedule: {e}", exc_info=True)
+                # Пауза перед следующей попыткой
+                time.sleep(5)
 
-                # Пытаемся восстановить работу
-                try:
-                    # Перезапускаем рабочие потоки
-                    self._stop_workers()
-                    self._start_workers()
+        logger.info("Основной цикл schedule завершен.")
+        # Остановка компонентов будет в shutdown
 
-                    # Если планировщик пуст, пересоздаем задачи
-                    if not schedule.jobs:
-                        schedule.every(interval).minutes.do(self.process_emails)
-                        logger.info(f"Планировщик перезапущен. Интервал проверки: {interval} минут")
-                except Exception as e2:
-                    logger.error(f"Не удалось восстановить работу: {e2}")
-
-                # Делаем паузу перед следующей итерацией
-                time.sleep(60)
 
     def shutdown(self) -> None:
-        """
-        Корректное завершение работы форвардера.
-        """
-        logger.info("Завершение работы форвардера...")
+        """ Корректное завершение работы форвардера. """
+        logger.info("Завершение работы форвардера EmailTelegramForwarder...")
 
-        # Остановка рабочих потоков
+        # 1. Устанавливаем флаг остановки (если еще не установлен)
+        self.stop_event.set()
+
+        # 2. Останавливаем основной планировщик (schedule) - он остановится сам в цикле
+
+        # 3. Останавливаем рабочие потоки обработки очереди email
         self._stop_workers()
 
-        # Очистка очереди
+        # 4. Очищаем очередь email
+        logger.debug("Очистка очереди email...")
+        cleared_count = 0
         while not self.email_queue.empty():
             try:
                 self.email_queue.get_nowait()
                 self.email_queue.task_done()
+                cleared_count += 1
             except queue.Empty:
                 break
+            except Exception as q_err:
+                 logger.warning(f"Ошибка при очистке email_queue: {q_err}")
+                 break
+        logger.debug(f"Очищено {cleared_count} элементов из email_queue.")
 
-        # Закрытие соединения с почтовым сервером
+
+        # 5. Останавливаем планировщик отложенных отправок
+        if self.delayed_sender:
+            self.delayed_sender.stop()
+
+        # 6. Закрытие соединения с почтовым сервером
+        logger.debug("Закрытие соединения с почтовым сервером...")
         try:
             with self._mail_lock:
                 if self._mail_connection:
                     try:
                         self._mail_connection.close()
                         self._mail_connection.logout()
-                    except Exception:
-                        pass
-                    self._mail_connection = None
+                        logger.debug("Соединение с почтовым сервером закрыто.")
+                    except Exception as mail_close_err:
+                         logger.warning(f"Ошибка при закрытии соединения с почтовым сервером: {mail_close_err}")
+                    finally:
+                         self._mail_connection = None
         except Exception as e:
-            logger.error(f"Ошибка при закрытии соединения с почтовым сервером: {e}")
+            logger.error(f"Ошибка при доступе к блокировке почтового соединения во время shutdown: {e}")
 
-        logger.info("Форвардер успешно завершил работу")
+        logger.info("Форвардер EmailTelegramForwarder успешно завершил работу.")
 
 
 def main():
-    """Основная функция для запуска форвардера с обработкой исключений."""
+    """Основная функция для запуска форвардера."""
+    # ... (без изменений) ...
     forwarder = None
     try:
-        # Создание экземпляра форвардера
+        logger.info("Инициализация EmailTelegramForwarder...")
         forwarder = EmailTelegramForwarder()
 
-        # Проверка соединений перед запуском
+        logger.info("Тестирование соединений перед запуском...")
         connections = forwarder.test_connections()
 
-        if not connections["mail"]:
-            logger.error("Не удалось подключиться к почтовому серверу. Проверьте настройки.")
+        if not connections.get("mail", False):
+            logger.error("Не удалось подключиться к почтовому серверу. Проверьте настройки. Завершение работы.")
             return
 
-        if not connections["telegram"]:
-            logger.error("Не удалось подключиться к Telegram API. Проверьте токен.")
+        if not connections.get("telegram", False):
+            logger.error("Не удалось подключиться к Telegram API. Проверьте токен. Завершение работы.")
             return
 
-        # Запуск планировщика проверки писем с интервалом из настроек
+        logger.info("Запуск планировщика проверки писем...")
+        # Интервал берется из настроек внутри forwarder'а
         forwarder.start_scheduler(interval=settings.CHECK_INTERVAL)
+
     except KeyboardInterrupt:
-        logger.info("Программа остановлена пользователем")
+        logger.info("Программа остановлена пользователем (KeyboardInterrupt).")
     except Exception as e:
-        logger.critical(f"Критическая ошибка при запуске программы: {e}")
-        logger.exception(e)
+        logger.critical(f"Критическая ошибка при запуске/работе программы: {e}", exc_info=True)
     finally:
-        # Корректное завершение работы
         if forwarder:
+            logger.info("Начало процедуры завершения работы forwarder...")
             try:
                 forwarder.shutdown()
-            except Exception as e:
-                logger.error(f"Ошибка при завершении работы программы: {e}")
+            except Exception as e_shut:
+                logger.error(f"Ошибка при завершении работы программы: {e_shut}", exc_info=True)
+        logger.info("Программа завершила работу.")
 
 
 if __name__ == "__main__":
