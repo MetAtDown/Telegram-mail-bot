@@ -7,10 +7,19 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     supervisor \
+    libpango-1.0-0 \
+    libcairo2 \
+    libgirepository1.0-dev \
+    libpangoft2-1.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-dejavu-core \
+    fonts-noto-color-emoji \
     && rm -rf /var/lib/apt/lists/*
 
 # Копируем файл с зависимостями и устанавливаем их
 COPY requirements.txt .
+# Добавляем gunicorn сюда, если он не в requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # Копируем файлы проекта
@@ -24,7 +33,7 @@ RUN mkdir -p data logs /etc/supervisor/conf.d
 # Создаем конфигурацию supervisor
 COPY supervisor.conf /etc/supervisor/conf.d/telegram-bot.conf
 
-# Открываем порт для веб-админки
+# Открываем порт для веб-админки (если она есть)
 EXPOSE 5000
 
 # Запускаем supervisor, который будет управлять обоими процессами

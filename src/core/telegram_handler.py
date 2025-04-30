@@ -25,6 +25,7 @@ CACHE_REFRESH_INTERVAL = 300  # секунды (5 минут)
 DELIVERY_MODE_TEXT = 'text'
 DELIVERY_MODE_HTML = 'html'
 DELIVERY_MODE_SMART = 'smart'
+DELIVERY_MODE_PDF = 'pdf'
 DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
 delivery_mode_factory = CallbackData("mode", prefix="dlvry")
@@ -171,6 +172,10 @@ class EmailBotHandler:
             types.InlineKeyboardButton(
                 get_button_text(DELIVERY_MODE_HTML, "Только HTML файл"),
                 callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_HTML)
+            ),
+            types.InlineKeyboardButton(
+                get_button_text(DELIVERY_MODE_PDF, "Только PDF файл"),
+                callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_PDF)
             )
         )
         return keyboard
@@ -496,7 +501,8 @@ class EmailBotHandler:
                 mode_description = {
                     DELIVERY_MODE_SMART: "Текст, если сообщение короткое, иначе HTML-файл.",
                     DELIVERY_MODE_TEXT: "Всегда текст, длинные сообщения будут разделены.",
-                    DELIVERY_MODE_HTML: "Всегда HTML-файл (если у письма есть HTML-версия)."
+                    DELIVERY_MODE_HTML: "Всегда HTML-файл (если у письма есть HTML-версия).",
+                    DELIVERY_MODE_PDF: "Всегда PDF-файл (если есть HTML-версия)."
                 }.get(current_mode, "Неизвестный режим.")
 
                 self._queue_message(
@@ -546,7 +552,8 @@ class EmailBotHandler:
                     mode_text_map = {
                         DELIVERY_MODE_SMART: "Авто (Текст/HTML)",
                         DELIVERY_MODE_TEXT: "Только текст",
-                        DELIVERY_MODE_HTML: "Только HTML файл"
+                        DELIVERY_MODE_HTML: "Только HTML файл",
+                        DELIVERY_MODE_PDF: "Только PDF файл"
                     }
                     mode_text = mode_text_map.get(new_mode, new_mode.capitalize())
 
