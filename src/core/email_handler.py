@@ -14,7 +14,7 @@ import shutil # Добавлен для надежной очистки
 from functools import lru_cache
 from typing import Dict, List, Tuple, Any, Optional, Set
 from email.header import decode_header
-from bs4 import BeautifulSoup, NavigableString
+from bs4 import BeautifulSoup, NavigableString, Tag
 import html
 import datetime
 from collections import defaultdict
@@ -723,110 +723,146 @@ class EmailTelegramForwarder:
             return original_subject # Возвращаем исходную в случае ошибки
 
     def format_email_body(self, body: str, content_type: str) -> str:
-        """ Форматирует тело письма, удаляя "Explore in Superset" и URL. """
-        # ... (без изменений) ...
+        """
+        Форматирует тело письма (HTML -> Текст), корректно обрабатывая <br> и <p>
+        на основе известной структуры генерации HTML.
+        """
         logger.debug(
-            f"Форматирование тела. Content-Type: {content_type}. Исходная длина: {len(body)}")
-        clean_text = ""
+            f"Форматирование тела (v3). Content-Type: {content_type}. Исходная длина: {len(body)}")
+        final_text = ""
         try:
-            # Если содержимое в HTML
+            # Только для HTML контента
             if content_type == "text/html":
                 try:
-                    # Сначала пробуем html.unescape, если падает - используем оригинал
+                    # Раскодирование HTML сущностей
                     try:
                         unescaped_body = html.unescape(body)
                     except Exception as ue:
                         logger.warning(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
                         unescaped_body = body
 
-                    # Затем парсим с BeautifulSoup
                     soup = BeautifulSoup(unescaped_body, 'html.parser')
 
-                    # Удаляем ненужные теги, ВКЛЮЧАЯ <th>
-                    for tag in soup(['script', 'style', 'meta', 'link', 'head', 'title', 'th']):
-                        tag.decompose()
+                    # --- Основная логика парсинга ---
+                    # Ищем основные контейнеры - ячейки таблицы
+                    # Предполагаем, что основной контент находится в <td>
+                    content_cells = soup.find_all('td')
+                    processed_parts = []
 
-                    # Обработка ссылок <a>
-                    for link_tag in soup.find_all('a', href=True):
-                        href = link_tag.get('href', '').strip()
-                        link_text = link_tag.get_text(separator=' ', strip=True)
-                        # Создаем текстовое представление ссылки
-                        if href:
-                            # Если текст ссылки пуст или совпадает с URL, показываем только URL
-                            if not link_text or link_text == href:
-                                replacement_text = f"{href}\n"
-                            # Иначе показываем текст и URL на новой строке
-                            else:
-                                replacement_text = f"{link_text}\n{href}\n"
-                            link_tag.replace_with(NavigableString(replacement_text))
-                        elif link_text: # Если есть текст, но нет href
-                            link_tag.replace_with(NavigableString(link_text))
-                        else: # Если нет ни текста, ни href, удаляем тег
-                            link_tag.decompose()
+                    if not content_cells:
+                         # Если нет <td>, пробуем обработать весь body как один блок
+                         logger.warning("Не найдены теги <td>, попытка обработки всего body.")
+                         content_cells = [soup] # Обрабатываем весь суп как один "блок"
 
-                    # Обработка <br> -> \n
-                    for br in soup.find_all('br'):
-                        br.replace_with(NavigableString('\n'))
+                    for cell in content_cells:
+                        # Внутри каждой ячейки обрабатываем теги
+                        current_cell_parts = []
+                        for element in cell.descendants: # Идем по всем вложенным элементам
+                            if isinstance(element, NavigableString):
+                                # Просто текст - добавляем, убирая лишние пробелы по краям
+                                text = str(element).strip()
+                                if text: # Добавляем только непустой текст
+                                    current_cell_parts.append(text)
+                            elif isinstance(element, Tag):
+                                # Обрабатываем теги
+                                if element.name == 'br':
+                                    # Заменяем <br> на перенос строки
+                                    # Добавляем перенос, только если предыдущий элемент не был переносом
+                                    # Или если это первый элемент
+                                    if not current_cell_parts or current_cell_parts[-1] != '\n':
+                                         current_cell_parts.append('\n')
+                                elif element.name == 'p':
+                                    # Проверяем, пустой ли тег <p>
+                                    p_text = element.get_text(strip=True)
+                                    if not p_text:
+                                        # Пустой <p></p> - добавляем двойной перенос для отступа
+                                        # Убедимся, что не добавляем лишние переносы подряд
+                                        while current_cell_parts and current_cell_parts[-1] == '\n':
+                                             current_cell_parts.pop() # Убираем предыдущие \n
+                                        if current_cell_parts: # Добавляем только если список не пуст
+                                             current_cell_parts.append('\n\n')
+                                    else:
+                                        pass # Текст из <p> добавится через NavigableString
 
-                    # Получаем текст, разделяя блоки переносами строк
-                    clean_text = soup.get_text(separator='\n', strip=True) # strip=True убирает пробелы по краям
+                                elif element.name == 'a':
+                                    # Обработка ссылок: "текст (URL)"
+                                    href = element.get('href', '').strip()
+                                    link_text = element.get_text(separator=' ', strip=True)
+                                    if href:
+                                        if not link_text or link_text == href:
+                                            current_cell_parts.append(href)
+                                        else:
+                                            current_cell_parts.append(f"{link_text} ({href})")
+                                        # Добавляем перенос после ссылки, чтобы она была на отдельной строке
+                                        if not current_cell_parts or current_cell_parts[-1] != '\n':
+                                            current_cell_parts.append('\n')
+                                    elif link_text:
+                                         current_cell_parts.append(link_text)
+                                # Игнорируем другие теги (th, table, a и т.д., т.к. обрабатываем их контент)
+
+
+                        # Собираем текст из частей ячейки
+                        cell_text = "".join(current_cell_parts)
+                        processed_parts.append(cell_text)
+
+                    # Объединяем текст из всех обработанных ячеек/частей
+                    # Добавляем разделитель между частями, если их больше одной
+                    final_text = "\n---\n".join(part.strip() for part in processed_parts if part.strip())
+
 
                 except Exception as parse_err:
-                    logger.error(f"Ошибка парсинга HTML BeautifulSoup: {parse_err}. Попытка вернуть исходный текст.")
-                    # В случае ошибки парсинга, возвращаем исходный текст как есть
-                    clean_text = body.strip()
-
+                    logger.error(f"Ошибка парсинга HTML BeautifulSoup (v3): {parse_err}. Попытка вернуть исходный текст.", exc_info=True)
+                    final_text = body.strip() # Fallback
 
             # Если содержимое в plain text
             elif content_type == "text/plain":
-                clean_text = body.strip()
+                final_text = body.strip()
             else:
                 logger.warning(f"Обработка неизвестного content_type: {content_type}. Используем исходный текст.")
-                clean_text = body.strip()
+                final_text = body.strip()
 
             # --- Логика удаления "Explore in Superset" ---
-            lines = clean_text.splitlines()
+            # Применяем к уже полученному final_text
+            lines = final_text.splitlines()
             filtered_lines = []
             skip_next_line = False
-            explore_removed = False # Флаг для логирования
+            explore_removed = False
 
             for line in lines:
-                line_stripped = line.strip() # Работаем с очищенной строкой
+                line_stripped = line.strip()
 
                 if skip_next_line:
                     skip_next_line = False
-                    logger.debug(f"Пропущена строка после 'Explore in Superset': '{line_stripped[:100]}...'")
-                    continue # Пропускаем строку после "Explore in Superset" (URL)
+                    # logger.debug(f"Пропущена строка после 'Explore in Superset': '{line_stripped[:100]}...'")
+                    continue
 
-                # Используем strip() для удаления возможных пробелов по краям
                 if line_stripped == "Explore in Superset":
-                    skip_next_line = True # Устанавливаем флаг пропуска следующей строки
+                    skip_next_line = True
                     explore_removed = True
-                    logger.debug("Найдена строка 'Explore in Superset', будет удалена вместе со следующей.")
-                    continue # Пропускаем саму строку "Explore in Superset"
+                    # logger.debug("Найдена строка 'Explore in Superset', будет удалена вместе со следующей.")
+                    continue
 
-                filtered_lines.append(line) # Добавляем строки, которые не нужно удалять
+                filtered_lines.append(line)
 
             if explore_removed:
                 logger.debug("Удалена строка 'Explore in Superset' и следующая за ней (если была).")
 
-            clean_text = "\n".join(filtered_lines).strip()
+            # Собираем текст обратно после фильтрации Superset
+            final_text = "\n".join(filtered_lines)
 
-            # --- Финальная очистка переносов и пробелов ---
-            # Заменяем 3 и более переносов на 2 *после* фильтрации
-            clean_text = re.sub(r'\n{3,}', '\n\n', clean_text)
-            # Убираем пробелы/табы перед переносом строки
-            clean_text = re.sub(r'[ \t]+\n', '\n', clean_text)
-            # Убираем пробелы/табы в конце строк
-            clean_text = re.sub(r'\n[ \t]+', '\n', clean_text)
-            # Убираем множественные пробелы внутри строк (опционально, может влиять на форматирование таблиц)
-            # clean_text = re.sub(r'[ \t]{2,}', ' ', clean_text)
+            # --- Финальная очистка переносов ---
+            # Сжимаем 3 и более переносов до 2
+            final_text = re.sub(r'\n{3,}', '\n\n', final_text)
+            # Убираем пробелы/табы в КОНЦЕ строк
+            final_text = "\n".join([line.rstrip() for line in final_text.splitlines()])
+            # Убираем пустые строки в начале/конце
+            final_text = final_text.strip()
 
-            logger.debug(f"Тело отформатировано (без Superset). Итоговая длина: {len(clean_text)}")
-            return clean_text
+            logger.debug(f"Тело отформатировано (v3 - descendants). Итоговая длина: {len(final_text)}")
+            return final_text
+
         except Exception as e:
-            logger.error(f"Критическая ошибка в format_email_body: {e}", exc_info=True)
-            # Возвращаем обрезанный исходный текст с предупреждением
+            logger.error(f"Критическая ошибка в format_email_body (v3): {e}", exc_info=True)
             truncated_body = body[:1000] + "..." if body and len(body) > 1000 else body if body else ""
             return f"⚠️ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
