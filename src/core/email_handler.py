@@ -1001,8 +1001,8 @@ class EmailTelegramForwarder:
                 elif user_delivery_mode == DELIVERY_MODE_PDF: should_send_file = True; file_format_to_send = 'pdf'
                 elif user_delivery_mode == DELIVERY_MODE_SMART and message_length >= TELEGRAM_MAX_LEN:
                     # В умном режиме отправляем файл, если текст не влезает в сообщение
-                    should_send_file = True; file_format_to_send = 'html' # По умолчанию HTML, т.к. он проще PDF
-                    logger.info(f"Smart режим ({chat_id}): Текст ({message_length} зн.) > лимита ({TELEGRAM_MAX_LEN}). Отправка как HTML.")
+                    should_send_file = True; file_format_to_send = 'pdf'
+                    logger.info(f"Smart режим ({chat_id}): Текст ({message_length} зн.) > лимита ({TELEGRAM_MAX_LEN}). Отправка как PDF.")
             else: # Если HTML версии нет
                 if user_delivery_mode in [DELIVERY_MODE_HTML, DELIVERY_MODE_PDF]:
                     logger.warning(f"Режим '{user_delivery_mode}' ({chat_id}) требует HTML, но его нет в письме. Отправка как текст.")

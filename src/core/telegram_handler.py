@@ -162,7 +162,7 @@ class EmailBotHandler:
 
         keyboard.add(
             types.InlineKeyboardButton(
-                get_button_text(DELIVERY_MODE_SMART, "Авто (Текст / HTML)"),
+                get_button_text(DELIVERY_MODE_SMART, "Авто (Текст / PDF)"),
                 callback_data=delivery_mode_factory.new(mode=DELIVERY_MODE_SMART)
             ),
             types.InlineKeyboardButton(
@@ -288,7 +288,7 @@ class EmailBotHandler:
             is_enabled = self.db_manager.get_user_status(chat_id)
             delivery_mode = self.db_manager.get_user_delivery_mode(chat_id)
             mode_text_map = {
-                DELIVERY_MODE_SMART: "Авто (Текст/HTML)",
+                DELIVERY_MODE_SMART: "Авто (Текст/PDF)",
                 DELIVERY_MODE_TEXT: "Только текст",
                 DELIVERY_MODE_HTML: "Только HTML файл"
             }
@@ -499,7 +499,7 @@ class EmailBotHandler:
                 current_mode = self.db_manager.get_user_delivery_mode(chat_id)
 
                 mode_description = {
-                    DELIVERY_MODE_SMART: "Текст, если сообщение короткое, иначе HTML-файл.",
+                    DELIVERY_MODE_SMART: "Текст, если сообщение короткое, иначе PDF-файл.",
                     DELIVERY_MODE_TEXT: "Всегда текст, длинные сообщения будут разделены.",
                     DELIVERY_MODE_HTML: "Всегда HTML-файл (если у письма есть HTML-версия).",
                     DELIVERY_MODE_PDF: "Всегда PDF-файл (если есть HTML-версия)."
@@ -550,7 +550,7 @@ class EmailBotHandler:
                 # Обновляем режим в базе данных
                 if self.db_manager.update_user_delivery_mode(chat_id, new_mode):
                     mode_text_map = {
-                        DELIVERY_MODE_SMART: "Авто (Текст/HTML)",
+                        DELIVERY_MODE_SMART: "Авто (Текст/PDF)",
                         DELIVERY_MODE_TEXT: "Только текст",
                         DELIVERY_MODE_HTML: "Только HTML файл",
                         DELIVERY_MODE_PDF: "Только PDF файл"
