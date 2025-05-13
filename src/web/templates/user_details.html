@@ -11,6 +11,7 @@
         </a>
     </div>
 
+    {# Панель информации о пользователе #}
     <div class="user-info-panel panel">
         <div class="panel-header">
             <div class="user-id-header">Пользователь ID: {{ user.chat_id }}</div>
@@ -20,17 +21,13 @@
             <div class="user-controls">
                 <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#addSubjectModal">Добавить тему</button>
                 <button type="button" class="btn btn-info" data-toggle="modal" data-target="#bulkAddSubjectModal">Массовое добавление тем</button>
-                <!-- <<<<<<< НОВАЯ КНОПКА >>>>>>> -->
                 <button type="button" class="btn btn-secondary" data-toggle="modal" data-target="#editNotesModal">Редактировать заметки</button>
-                <!-- <<<<<<< КОНЕЦ НОВОЙ КНОПКИ >>>>>>> -->
 
                 <form method="post" action="{{ url_for('toggle_user_status', chat_id=user.chat_id) }}" style="display:inline;">
                     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    {% if user.is_enabled %}
-                    <button type="submit" class="btn btn-warning">Отключить уведомления</button>
-                    {% else %}
-                    <button type="submit" class="btn btn-warning">Включить уведомления</button>
-                    {% endif %}
+                    <button type="submit" class="btn btn-warning">
+                        {% if user.is_enabled %}Отключить уведомления{% else %}Включить уведомления{% endif %}
+                    </button>
                 </form>
 
                 <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
@@ -39,24 +36,18 @@
                 </form>
             </div>
 
-            <!-- <<<<<<< НОВЫЙ БЛОК ДЛЯ ОТОБРАЖЕНИЯ ЗАМЕТОК >>>>>>> -->
             <div class="notes-section">
                 <h4>Заметки:</h4>
                 {% if user.notes %}
-                    {# Используем div с новым классом и title #}
-                    <div class="notes-content truncate-text-multiline" title="{{ user.notes }}">
-                        {{ user.notes }} {# Отображаем полный текст, CSS его обрежет #}
-                    </div>
+                    <div class="notes-content truncate-text-multiline" title="{{ user.notes }}">{{ user.notes }}</div>
                 {% else %}
                     <p class="no-notes">Заметок нет.</p>
                 {% endif %}
             </div>
-            <!-- <<<<<<< КОНЕЦ НОВОГО БЛОКА >>>>>>> -->
-
         </div>
     </div>
 
-
+    {# Панель тем подписок #}
     <div class="panel">
         <div class="panel-header">
             Темы подписок
@@ -65,61 +56,70 @@
                  <div class="search-controls">
                      <button type="button" class="btn search-btn" id="search-button">Поиск</button>
                      <button type="button" class="btn clear-btn" id="clear-search-button">Очистить</button>
-                     <div class="results-counter" id="results-count">Найдено: {{ user.subjects|length }}</div>
+                     <div class="results-counter" id="results-count">Найдено: {{ user.subjects_with_modes|length }}</div>
                  </div>
              </div>
         </div>
         <div class="panel-body">
-            {% if user.subjects %}
+            {% if user.subjects_with_modes %}
             <table class="themes-table" id="themes-table">
                 <thead>
                     <tr>
                         <th>#</th>
                         <th>Тема</th>
+                        <th>Формат отправки</th>
                         <th>Действия</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for subject in user.subjects %}
+                    {% for subject_tuple in user.subjects_with_modes %}
                     <tr class="subject-row">
                         <td>{{ loop.index }}</td>
-                        <td class="subject-name">{{ subject }}</td>
+                        <td class="subject-name">{{ subject_tuple[0] }}</td>
+                        <td>{{ delivery_modes_config.display_map.get(subject_tuple[1], subject_tuple[1]) }}</td>
                         <td class="actions-cell">
-                            <button type="button" class="btn btn-warning edit-btn" data-toggle="modal" data-target="#editSubjectModal" data-subject="{{ subject }}">Редактировать</button>
-                            <form method="post" action="{{ url_for('delete_subject', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить тему \'{{ subject }}\'?');">
+                            <button type="button" class="btn btn-warning edit-btn"
+                                    data-subject-name="{{ subject_tuple[0] }}"
+                                    data-delivery-mode="{{ subject_tuple[1] }}"
+                                    data-toggle="modal"
+                                    data-target="#editSubjectModal"
+                                    title="Редактировать тему '{{ subject_tuple[0] }}'">Редактировать</button>
+                            <form method="post" action="{{ url_for('delete_subject', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить тему \'{{ subject_tuple[0] }}\'?');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <input type="hidden" name="subject" value="{{ subject }}">
+                                <input type="hidden" name="subject" value="{{ subject_tuple[0] }}">
                                 <button type="submit" class="btn btn-danger delete-btn">Удалить</button>
                             </form>
                         </td>
                     </tr>
-                    {% else %} {# Добавлено: сообщение, если поиск не дал результатов #}
-                    <tr class="no-results-row" style="display: none;">
-                         <td colspan="3" class="text-center">По вашему запросу тем не найдено.</td>
-                    </tr>
                     {% endfor %}
+                    <tr class="no-results-row" style="display: none;">
+                         <td colspan="4" class="text-center">По вашему запросу тем не найдено.</td>
+                    </tr>
                 </tbody>
             </table>
-             {% else %}
-                 <p class="text-center">У пользователя нет тем</p>
-             {% endif %}
+            {% else %}
+                 <p class="text-center">У пользователя нет тем.</p>
+            {% endif %}
         </div>
     </div>
 
-    <!-- Модальное окно для добавления темы -->
-    <div class="modal" id="addSubjectModal">
-        <div class="modal-dialog">
+    <!-- Модальные окна -->
+    <!-- Добавление темы -->
+    <div class="modal" id="addSubjectModal" tabindex="-1" role="dialog" aria-labelledby="addSubjectModalLabel" aria-hidden="true" style="display: none;">
+        <div class="modal-dialog" role="document">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>Добавление темы</h2>
-                    <button type="button" class="close" data-dismiss="modal">×</button>
+                    <h5 class="modal-title" id="addSubjectModalLabel">Добавление темы</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">×</span>
+                    </button>
                 </div>
                 <div class="modal-body">
                     <form method="post" action="{{ url_for('add_subject', chat_id=user.chat_id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="form-group">
-                            <label class="form-label">Тема</label>
-                            <input type="text" name="subject" class="form-control" required>
+                            <label for="add-subject-name" class="form-label">Тема</label>
+                            <input type="text" name="subject" id="add-subject-name" class="form-control" required>
                         </div>
                         <button type="submit" class="btn btn-primary">Добавить</button>
                     </form>
@@ -128,46 +128,68 @@
         </div>
     </div>
 
-    <!-- Модальное окно для редактирования темы -->
-    <div class="modal" id="editSubjectModal">
-        <div class="modal-dialog">
+    <!-- Редактирование темы -->
+    <div class="modal" id="editSubjectModal" tabindex="-1" role="dialog" aria-labelledby="editSubjectModalLabel" aria-hidden="true" style="display: none;">
+        <div class="modal-dialog" role="document">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>Редактирование темы</h2>
-                    <button type="button" class="close" data-dismiss="modal">×</button>
+                    <h5 class="modal-title" id="editSubjectModalLabel">Редактирование темы</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">×</span>
+                    </button>
                 </div>
                 <div class="modal-body">
-                    <form method="post" action="{{ url_for('edit_subject', chat_id=user.chat_id) }}">
+                    <form id="editSubjectForm" method="post" action="{{ url_for('edit_subject', chat_id=user.chat_id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <input type="hidden" name="old_subject" id="oldSubject">
+                        <input type="hidden" name="old_subject" id="edit-form-old-subject" value="">
+
                         <div class="form-group">
-                            <label class="form-label">Старая тема:</label>
-                            <p id="oldSubjectDisplay"></p>
+                            <label class="form-label">Текущая тема:</label>
+                            <p id="edit-modal-current-subject-display">-</p>
                         </div>
                         <div class="form-group">
-                            <label class="form-label" for="newSubject">Новое название темы</label>
-                            <input type="text" name="new_subject" id="newSubject" class="form-control" required>
+                            <label for="edit-form-new-subject" class="form-label">Новое название темы</label>
+                            <input type="text" name="new_subject" id="edit-form-new-subject" class="form-control" required>
                         </div>
-                        <button type="submit" class="btn btn-warning">Сохранить</button>
+                        <div class="form-group">
+                            <label for="edit-form-new-delivery-mode" class="form-label">Формат отправки</label>
+                            <select name="new_delivery_mode" id="edit-form-new-delivery-mode" class="form-control" required>
+                                {% if delivery_modes_config and delivery_modes_config.options %}
+                                    {% for mode_key in delivery_modes_config.options %}
+                                    <option value="{{ mode_key }}">
+                                        {{ delivery_modes_config.display_map.get(mode_key, mode_key) }}
+                                    </option>
+                                    {% endfor %}
+                                {% else %}
+                                    <option value="smart">Авто (Smart)</option>
+                                    <option value="text">Только текст</option>
+                                    <option value="html">HTML</option>
+                                    <option value="pdf">PDF</option>
+                                {% endif %}
+                            </select>
+                        </div>
+                        <button type="submit" class="btn btn-warning">Сохранить изменения</button>
                     </form>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Модальное окно для массового добавления тем -->
-    <div class="modal" id="bulkAddSubjectModal">
-         <div class="modal-dialog">
+    <!-- Массовое добавление тем -->
+    <div class="modal" id="bulkAddSubjectModal" tabindex="-1" role="dialog" aria-labelledby="bulkAddSubjectModalLabel" aria-hidden="true" style="display: none;">
+         <div class="modal-dialog" role="document">
              <div class="modal-content">
                  <div class="modal-header">
-                     <h2>Массовое добавление тем</h2>
-                     <button type="button" class="close" data-dismiss="modal">×</button>
+                     <h5 class="modal-title" id="bulkAddSubjectModalLabel">Массовое добавление тем</h5>
+                     <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">×</span>
+                    </button>
                  </div>
                  <div class="modal-body">
                      <form method="post" action="{{ url_for('add_subjects_bulk', chat_id=user.chat_id) }}">
                          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                          <div class="form-group">
-                             <label class="form-label" for="subjects_bulk_textarea">Список тем (каждая с новой строки)</label>
+                             <label for="subjects_bulk_textarea" class="form-label">Список тем (каждая с новой строки)</label>
                              <textarea id="subjects_bulk_textarea" name="subjects_bulk" class="form-control" rows="10"></textarea>
                          </div>
                          <button type="submit" class="btn btn-primary">Добавить темы</button>
@@ -177,19 +199,21 @@
          </div>
      </div>
 
-    <!-- <<<<<<< НОВОЕ МОДАЛЬНОЕ ОКНО >>>>>>> -->
-    <div class="modal" id="editNotesModal">
-        <div class="modal-dialog modal-lg"> <!-- Можно сделать пошире -->
+    <!-- Редактирование заметок -->
+    <div class="modal" id="editNotesModal" tabindex="-1" role="dialog" aria-labelledby="editNotesModalLabel" aria-hidden="true" style="display: none;">
+        <div class="modal-dialog modal-lg" role="document">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h2>Редактирование заметок</h2>
-                    <button type="button" class="close" data-dismiss="modal">×</button>
+                    <h5 class="modal-title" id="editNotesModalLabel">Редактирование заметок</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                        <span aria-hidden="true">×</span>
+                    </button>
                 </div>
                 <div class="modal-body">
                     <form method="post" action="{{ url_for('update_user_notes', chat_id=user.chat_id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="form-group">
-                            <label class="form-label" for="notesTextarea">Текст заметки</label>
+                            <label for="notesTextarea" class="form-label">Текст заметки</label>
                             <textarea name="notes" id="notesTextarea" class="form-control" rows="8">{{ user.notes|default('') }}</textarea>
                              <div class="hint-text">Введите или отредактируйте заметку для этого пользователя/группы.</div>
                         </div>
@@ -199,97 +223,168 @@
             </div>
         </div>
     </div>
-    <!-- <<<<<<< КОНЕЦ НОВОГО МОДАЛЬНОГО ОКНА >>>>>>> -->
-
-    <!-- Скрытая форма для серверного поиска НЕ НУЖНА, поиск будет через JS -->
-    <!-- <form action="{{ url_for('user_details', chat_id=user.chat_id) }}" method="get" id="server-search-form" style="display:none;">
-        <input type="hidden" name="search" id="server-search-input" value="{{ request.args.get('search', '') }}">
-    </form> -->
 </div>
 {% endblock %}
 
-{% block scripts %}
+{% block extra_js %}
 <script>
+console.log("JS user_details.html: Скрипт начал выполнение.");
+
 document.addEventListener('DOMContentLoaded', function() {
-    // --- Логика для модального окна редактирования темы ---
-    const editSubjectModal = document.getElementById('editSubjectModal');
-    if (editSubjectModal) {
-        // Используем делегирование событий для кнопок редактирования
-        document.querySelector('.themes-table tbody')?.addEventListener('click', function(event) {
-            if (event.target.classList.contains('edit-btn')) {
-                const button = event.target;
-                const oldSubject = button.getAttribute('data-subject');
-                const oldSubjectField = editSubjectModal.querySelector('#oldSubject');
-                const oldSubjectDisplay = editSubjectModal.querySelector('#oldSubjectDisplay');
-                const newSubjectField = editSubjectModal.querySelector('#newSubject');
+    console.log("JS user_details.html: DOMContentLoaded сработал.");
 
-                if (oldSubjectField && oldSubjectDisplay && newSubjectField) {
-                    oldSubjectField.value = oldSubject;
-                    oldSubjectDisplay.textContent = oldSubject; // Отображаем старую тему
-                    newSubjectField.value = oldSubject; // Предзаполняем новой темой старую
-                    // newSubjectField.focus(); // Можно раскомментировать для фокуса
-                }
-            }
-        });
+    const editSubjectModalElement = document.getElementById('editSubjectModal');
+    const themesTableBody = document.querySelector('#themes-table tbody');
 
-        // Закрытие модалки
-        editSubjectModal.querySelector('.close')?.addEventListener('click', () => {
-            // Логика закрытия, если нужна
-        });
-        editSubjectModal.querySelector('[data-dismiss="modal"]')?.addEventListener('click', () => {
-            // Логика закрытия, если нужна
-        });
+    // Проверка наличия элементов
+    if (!editSubjectModalElement) {
+        console.error("JS user_details.html: Модальное окно #editSubjectModal не найдено!");
+    }
+    if (!themesTableBody) {
+        console.error("JS user_details.html: Тело таблицы #themes-table tbody не найдено!");
     }
 
-    // --- Логика для поиска тем на стороне клиента ---
+    if (themesTableBody && editSubjectModalElement) {
+        themesTableBody.addEventListener('click', function(event) {
+            const clickedButton = event.target.closest('.edit-btn');
+            if (!clickedButton) {
+                return; // Клик не по кнопке "Редактировать"
+            }
+            console.log("JS user_details.html: Клик по кнопке .edit-btn обнаружен.");
+            event.preventDefault();
+
+            const subjectNameToEdit = clickedButton.getAttribute('data-subject-name');
+            const currentDeliveryMode = clickedButton.getAttribute('data-delivery-mode');
+
+            console.log(`JS user_details.html: Прочитано с кнопки: Имя='${subjectNameToEdit}', Режим='${currentDeliveryMode}'`);
+
+            if (typeof subjectNameToEdit !== 'string' || subjectNameToEdit.trim() === "") {
+                console.error('JS user_details.html: data-subject-name отсутствует или пусто на кнопке!', clickedButton);
+                // Можно добавить уведомление пользователю, если это критично
+                // alert('Ошибка: Не удалось прочитать имя темы. Попробуйте обновить страницу.');
+                return;
+            }
+            const trimmedSubjectName = subjectNameToEdit.trim();
+
+            // --- НЕПОСРЕДСТВЕННОЕ ЗАПОЛНЕНИЕ ПОЛЕЙ МОДАЛЬНОГО ОКНА ---
+            const hiddenOldSubjectField = editSubjectModalElement.querySelector('#edit-form-old-subject');
+            if (hiddenOldSubjectField) {
+                hiddenOldSubjectField.value = trimmedSubjectName;
+                console.log(`JS user_details.html: Установлено значение #edit-form-old-subject: '${hiddenOldSubjectField.value}'`);
+            } else {
+                console.error('JS user_details.html: Скрытое поле #edit-form-old-subject не найдено!');
+                return;
+            }
+
+            const currentSubjectDisplay = editSubjectModalElement.querySelector('#edit-modal-current-subject-display');
+            const newSubjectNameField = editSubjectModalElement.querySelector('#edit-form-new-subject');
+            const newDeliveryModeSelect = editSubjectModalElement.querySelector('#edit-form-new-delivery-mode');
+
+            if (currentSubjectDisplay) {
+                currentSubjectDisplay.textContent = trimmedSubjectName;
+            }
+            if (newSubjectNameField) {
+                newSubjectNameField.value = trimmedSubjectName;
+            }
+            if (newDeliveryModeSelect) {
+                if (currentDeliveryMode !== null && typeof currentDeliveryMode !== 'undefined') {
+                    const optionExists = Array.from(newDeliveryModeSelect.options).some(opt => opt.value === currentDeliveryMode);
+                    if (optionExists) {
+                        newDeliveryModeSelect.value = currentDeliveryMode;
+                    } else {
+                        console.warn(`JS user_details.html: Режим '${currentDeliveryMode}' не найден в селекте, используется default.`);
+                        newDeliveryModeSelect.value = "{{ delivery_modes_config.default | default('smart') }}";
+                    }
+                } else {
+                    console.warn(`JS user_details.html: Режим доставки не определен, используется default.`);
+                    newDeliveryModeSelect.value = "{{ delivery_modes_config.default | default('smart') }}";
+                }
+            }
+            console.log("JS user_details.html: Поля модального окна #editSubjectModal заполнены.");
+            // main.js должен сам показать модальное окно через data-toggle="modal"
+        });
+    } else {
+        console.warn("JS user_details.html: Модальное окно или тело таблицы не найдены, обработчик для .edit-btn не будет работать.");
+    }
+
+    // --- Поиск по темам ---
     const searchInput = document.getElementById('subject-search');
     const searchButton = document.getElementById('search-button');
     const clearButton = document.getElementById('clear-search-button');
-    const tableBody = document.getElementById('themes-table')?.querySelector('tbody');
     const resultsCount = document.getElementById('results-count');
-    const noResultsRow = document.querySelector('.no-results-row');
+    let noResultsRow = null;
+    if (themesTableBody) {
+        noResultsRow = themesTableBody.querySelector('tr.no-results-row');
+    }
 
     function filterSubjects() {
+        if (!themesTableBody || !searchInput || !resultsCount ) {
+            return;
+        }
         const query = searchInput.value.toLowerCase().trim();
         let visibleCount = 0;
-        const rows = tableBody?.querySelectorAll('tr.subject-row'); // Выбираем только строки с темами
+        const rows = themesTableBody.querySelectorAll('tr.subject-row');
 
-        rows?.forEach(row => {
-            const subjectName = row.querySelector('.subject-name')?.textContent.toLowerCase();
+        rows.forEach(row => {
+            const subjectNameCell = row.querySelector('td.subject-name');
+            const subjectName = subjectNameCell?.textContent.toLowerCase();
+
             if (subjectName && subjectName.includes(query)) {
-                row.style.display = ''; // Показываем строку
+                row.style.display = '';
                 visibleCount++;
             } else {
-                row.style.display = 'none'; // Скрываем строку
+                row.style.display = 'none';
             }
         });
 
-        // Обновляем счетчик
-        if (resultsCount) {
-            resultsCount.textContent = `Найдено: ${visibleCount}`;
-        }
-
-        // Показываем/скрываем сообщение "не найдено"
+        resultsCount.textContent = `Найдено: ${visibleCount}`;
         if (noResultsRow) {
-            noResultsRow.style.display = (visibleCount === 0 && rows && rows.length > 0) ? '' : 'none';
+             noResultsRow.style.display = (visibleCount === 0 && query !== '' && rows.length > 0) ? '' : 'none';
+        }
+
+        if (query === '' && rows.length > 0) {
+             resultsCount.textContent = `Найдено: ${rows.length}`;
+        } else if (rows.length === 0 && query === '') {
+            resultsCount.textContent = `Найдено: 0`;
         }
     }
 
-    searchButton?.addEventListener('click', filterSubjects);
-    clearButton?.addEventListener('click', () => {
-        searchInput.value = '';
-        filterSubjects(); // Применяем пустой фильтр, чтобы показать все
-    });
-    // Фильтрация при вводе
-    searchInput?.addEventListener('input', filterSubjects);
-
-    // Применяем фильтр при загрузке страницы, если в поле поиска что-то есть
-    if (searchInput?.value) {
-        filterSubjects();
+    if (searchButton) searchButton.addEventListener('click', filterSubjects);
+    if (clearButton) {
+        clearButton.addEventListener('click', () => {
+            if (searchInput) searchInput.value = '';
+            filterSubjects();
+        });
+    }
+    if (searchInput) {
+         searchInput.addEventListener('input', filterSubjects);
+         const urlParams = new URLSearchParams(window.location.search);
+         const searchParam = urlParams.get('search');
+         if (searchParam) {
+            searchInput.value = searchParam;
+         }
+         filterSubjects(); // Применить фильтр при загрузке
+    } else if (resultsCount && themesTableBody){ // Если нет поля поиска, но есть элементы для отображения счетчика
+         const initialRowCount = themesTableBody.querySelectorAll('tr.subject-row').length;
+         resultsCount.textContent = `Найдено: ${initialRowCount}`;
+         if(noResultsRow) noResultsRow.style.display = 'none';
     }
 
-    // --- Логика для модальных окон (открытие/закрытие) ---
-    // Уже должна быть в main.js или base.html
+    // --- Обрезание текста заметок ---
+     document.querySelectorAll('.truncate-text-multiline').forEach(elem => {
+        elem.addEventListener('click', () => {
+            // Проверяем текущее состояние и переключаем
+            // Используем класс 'expanded' для явного управления состоянием, а не только webkitLineClamp
+            if (elem.classList.contains('expanded')) {
+                elem.style.webkitLineClamp = ''; // Возвращаем обрезание (браузер определит кол-во строк по CSS)
+                elem.classList.remove('expanded');
+            } else {
+                elem.style.webkitLineClamp = 'none'; // Показываем все строки
+                elem.classList.add('expanded');
+            }
+        });
+    });
+    console.log("JS user_details.html: Скрипт завершил выполнение (конец DOMContentLoaded).");
 });
 </script>
 {% endblock %}

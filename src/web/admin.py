@@ -19,7 +19,7 @@ import concurrent.futures
 import signal
 import sys
 import psutil
-
+from src.db.manager import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF
 from src.config import settings
 from src.utils.logger import get_logger
 from src.core.bot_status import get_bot_status, start_bot, stop_bot
@@ -342,36 +342,51 @@ def is_allowed_sql(query: str, user_role: str) -> bool:
     return True
 
 
-def check_duplicate_subjects(subjects: List[str], exclude_chat_id: Optional[str] = None) -> List[str]:
+def check_duplicate_subjects(subjects_to_check: List[str], exclude_chat_id: Optional[str] = None) -> List[str]:
     """
     Проверяет наличие дубликатов тем у других пользователей.
+    Использует новый db_manager.get_all_subjects().
 
     Args:
-        subjects: Список тем для проверки
-        exclude_chat_id: ID чата пользователя, которого нужно исключить из проверки
+        subjects_to_check: Список тем для проверки.
+        exclude_chat_id: ID чата пользователя, которого нужно исключить из проверки.
 
     Returns:
-        Список тем, которые уже существуют у других пользователей
+        Список тем, которые уже существуют у других пользователей.
     """
-    if not subjects:
+    if not subjects_to_check:
         return []
 
-    duplicate_subjects = []
+    duplicate_subjects_found = set()
+    subjects_to_check_set = set(subjects_to_check) # Для быстрой проверки
 
-    # Получаем данные из кэша или БД
-    def get_client_data():
-        return db_manager.get_all_client_data()
+    try:
+        # Получаем данные из кэша или БД (новая структура)
+        # { 'Тема': [{'chat_id': id, ...}, ...], ... }
+        def get_all_subs_data():
+            return db_manager.get_all_subjects()
 
-    client_data = get_cached_data('all_client_data', get_client_data)
+        all_subscriptions = get_cached_data('all_subjects', get_all_subs_data)
 
-    for chat_id, user_subjects in client_data.items():
-        if exclude_chat_id and chat_id == exclude_chat_id:
-            continue
-        for subject in subjects:
-            if subject in user_subjects and subject not in duplicate_subjects:
-                duplicate_subjects.append(subject)
+        # Итерируем по всем темам и их подписчикам
+        for subject, subscribers in all_subscriptions.items():
+            # Если эта тема есть в списке проверяемых
+            if subject in subjects_to_check_set:
+                # Проверяем подписчиков этой темы
+                for subscriber_info in subscribers:
+                    subscriber_chat_id = subscriber_info.get('chat_id')
+                    # Если подписчик не тот, которого мы исключаем
+                    if subscriber_chat_id != exclude_chat_id:
+                        # Нашли дубликат у другого пользователя
+                        duplicate_subjects_found.add(subject)
+                        break # Достаточно одного другого подписчика для этой темы
 
-    return duplicate_subjects
+    except Exception as e:
+        logger.error(f"Ошибка при проверке дубликатов тем: {e}", exc_info=True)
+        # В случае ошибки лучше вернуть пустой список, чтобы не блокировать действие
+        return []
+
+    return list(duplicate_subjects_found)
 
 
 # Обработчики сигналов для корректного завершения работы
@@ -571,19 +586,34 @@ def index():
     try:
         # Получаем данные из кэша или обновляем
         def get_stats():
-            # Получение информации о пользователях и темах
-            user_states = db_manager.get_all_users()
-            client_data = db_manager.get_all_client_data()
+            # Получение информации о пользователях
+            user_states = db_manager.get_all_users() # Этот метод остался
 
-            # Подсчет статистики
+            # --- ИЗМЕНЕНИЕ: Подсчет тем напрямую ---
+            total_subjects = 0
+            try:
+                # Выполняем простой COUNT(*) запрос к таблице subjects
+                # Используем execute_optimized_query для получения результата
+                result = db_manager.execute_optimized_query(
+                    "SELECT COUNT(*) as count FROM subjects",
+                    fetch_all=False # Нам нужна только одна строка с результатом
+                )
+                if result and 'count' in result[0]:
+                    total_subjects = result[0]['count']
+                else:
+                     logger.warning("Не удалось получить количество тем из БД для статистики.")
+            except Exception as count_err:
+                logger.error(f"Ошибка при подсчете тем для статистики: {count_err}")
+            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+            # Подсчет статистики пользователей
             total_users = len(user_states)
             active_users = sum(1 for status in user_states.values() if status)
-            total_subjects = sum(len(subjects) for subjects in client_data.values())
 
             return {
                 'total_users': total_users,
                 'active_users': active_users,
-                'total_subjects': total_subjects
+                'total_subjects': total_subjects # Используем посчитанное значение
             }
 
         stats = get_cached_data('stats', get_stats, ttl=60)  # Кэшируем на минуту
@@ -619,28 +649,39 @@ def users():
 
         # Получаем данные из кэша или обновляем (включая заметки)
         def get_users_data():
-            all_users_details = db_manager.execute_optimized_query(
-                "SELECT chat_id, status, notes FROM users"
-            )
-            users_map = {
-                u['chat_id']: {
-                    'is_enabled': u['status'] == 'Enable',
-                    'status_text': 'Активен' if u['status'] == 'Enable' else 'Отключен',
-                    'notes': u.get('notes', '')
-                } for u in all_users_details
-            }
-            client_data = db_manager.get_all_client_data()
+            logger.debug("Запрос данных пользователей с количеством тем для админки...")
             users_data = []
-            for chat_id, details in users_map.items():
-                subjects = client_data.get(chat_id, [])
-                users_data.append({
-                    'chat_id': chat_id,
-                    'status': details['status_text'],
-                    'is_enabled': details['is_enabled'],
-                    'subject_count': len(subjects),
-                    'notes': details['notes']
-                })
-            users_data.sort(key=lambda x: (not x['is_enabled'], x['chat_id']))
+            try:
+                # --- ИЗМЕНЕНИЕ: Получаем все данные одним запросом с JOIN и COUNT ---
+                query = """
+                    SELECT
+                        u.chat_id,
+                        u.status,
+                        u.notes,
+                        COUNT(s.id) as subject_count
+                    FROM users u
+                    LEFT JOIN subjects s ON u.chat_id = s.chat_id
+                    GROUP BY u.chat_id, u.status, u.notes
+                    ORDER BY u.status DESC, u.chat_id  -- Сначала активные
+                """
+                # Используем execute_optimized_query
+                all_users_details = db_manager.execute_optimized_query(query)
+                logger.debug(f"Получено {len(all_users_details)} записей пользователей из БД.")
+
+                # Формируем данные для шаблона
+                users_data = [
+                    {
+                        'chat_id': u['chat_id'],
+                        'status': 'Активен' if u['status'] == 'Enable' else 'Отключен',
+                        'is_enabled': u['status'] == 'Enable',
+                        'subject_count': u.get('subject_count', 0), # Используем результат COUNT
+                        'notes': u.get('notes', '')
+                    } for u in all_users_details
+                ]
+                # Сортировка уже сделана в SQL запросе ORDER BY u.status DESC
+
+            except Exception as db_err:
+                 logger.error(f"Ошибка при получении данных пользователей с темами: {db_err}", exc_info=True)
             return users_data
 
         # Получаем ВСЕ данные пользователей с заметками
@@ -678,47 +719,67 @@ def users():
 def user_details(chat_id: str):
     """
     Страница с деталями пользователя и его темами.
+    (Исправлена для передачи полного списка тем с режимами в шаблон)
 
     Args:
         chat_id: ID чата пользователя
     """
     try:
-        # Получаем данные из кэша или обновляем
         def get_user_data():
             is_enabled = db_manager.get_user_status(chat_id)
-            subjects = db_manager.get_user_subjects(chat_id)
+            # subjects_with_modes - это список кортежей [(тема, режим), ...]
+            subjects_with_modes_tuples = db_manager.get_user_subjects(chat_id)
             notes = db_manager.get_user_notes(chat_id)
 
             return {
                 'is_enabled': is_enabled,
-                'subjects': subjects,
+                'subjects_with_modes': subjects_with_modes_tuples, # <--- Передаем полный список кортежей
                 'notes': notes
             }
 
-        # Ключ кэша теперь включает заметки
         user_data_cache = get_cached_data(f'user_data_{chat_id}', get_user_data, ttl=60)
 
         is_enabled = user_data_cache['is_enabled']
-        subjects = user_data_cache['subjects']
+        # <<< ИСПОЛЬЗУЕМ ПОЛНЫЙ СПИСОК ТЕМ С РЕЖИМАМИ >>>
+        subjects_with_modes = user_data_cache['subjects_with_modes']
         notes = user_data_cache['notes']
 
-        # Добавить поиск по темам
+        # Поиск по темам (применяется к списку кортежей, ищем по имени темы)
         search_query = request.args.get('search', '')
         if search_query:
-            subjects = [s for s in subjects if search_query.lower() in s.lower()]
+            # Фильтруем список кортежей по имени темы (первый элемент кортежа)
+            filtered_subjects_with_modes = [
+                s_tuple for s_tuple in subjects_with_modes if search_query.lower() in s_tuple[0].lower()
+            ]
+        else:
+            filtered_subjects_with_modes = subjects_with_modes
 
         user_data = {
             'chat_id': chat_id,
             'status': 'Активен' if is_enabled else 'Отключен',
             'is_enabled': is_enabled,
-            'subjects': subjects,
-            'notes': notes # <<< Передаем заметки в данные для шаблона
+            'subjects_with_modes': filtered_subjects_with_modes, # <--- Передаем (отфильтрованный) список кортежей
+            'notes': notes
         }
 
-        # Получаем роль пользователя для отображения доступных действий
         user_role = session.get('user_role', 'viewer')
 
-        return render_template('user_details.html', user=user_data, user_role=user_role)
+        # Конфигурация для выбора режима доставки в модальном окне
+        delivery_modes_config = {
+            "options": sorted(list(ALLOWED_DELIVERY_MODES)), # Гарантируем порядок
+            "default": DEFAULT_DELIVERY_MODE,
+            "display_map": {
+                DELIVERY_MODE_TEXT: 'Только текст',
+                DELIVERY_MODE_HTML: 'HTML',
+                DELIVERY_MODE_SMART: 'Авто (Smart)',
+                DELIVERY_MODE_PDF: 'PDF'
+            }
+        }
+
+        return render_template('user_details.html',
+                               user=user_data,
+                               user_role=user_role,
+                               delivery_modes_config=delivery_modes_config) # <--- Передаем конфигурацию
     except Exception as e:
         logger.error(f"Ошибка при загрузке деталей пользователя {chat_id}: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
@@ -823,53 +884,148 @@ def add_subject(chat_id: str):
 @limiter.limit("100 per minute")
 def edit_subject(chat_id: str):
     """
-    Редактирование темы пользователя.
-
+    Редактирование темы пользователя (имя и/или формат отправки).
     Args:
         chat_id: ID чата пользователя
     """
-    try:
-        old_subject = request.form.get('old_subject', '').strip()
-        new_subject = request.form.get('new_subject', '').strip()
-        confirm_duplicate = request.form.get('confirm_duplicate') == 'true'
+    logger.debug(f"Edit subject request for chat_id={chat_id}. Form data: {request.form}")
 
-        if not old_subject or not new_subject:
-            flash("Тема не может быть пустой", "warning")
+    try:
+        old_subject_name = request.form.get('old_subject', '').strip()
+        new_subject_name = request.form.get('new_subject', '').strip()
+        new_delivery_mode = request.form.get('new_delivery_mode', DEFAULT_DELIVERY_MODE).strip()
+        confirm_duplicate = request.form.get('confirm_duplicate') == 'true' # Для дубликатов у ДРУГИХ юзеров
+
+        # --- КРИТИЧЕСКАЯ ПРОВЕРКА ---
+        if not old_subject_name:
+            logger.error(f"CRITICAL ERROR: 'old_subject' is empty in submitted form for chat_id={chat_id}. Form: {request.form}")
+            flash("Критическая ошибка: Не удалось определить редактируемую тему. Обновите страницу и попробуйте снова.", "danger")
             return redirect(url_for('user_details', chat_id=chat_id))
 
-        # Проверка на дубликаты тем у других пользователей
-        if old_subject != new_subject:  # Проверяем только если тема действительно изменилась
-            duplicate_subjects = check_duplicate_subjects([new_subject], chat_id)
+        # Проверка входных данных
+        if not new_subject_name:
+            flash("Новое имя темы не может быть пустым.", "warning")
+            return redirect(url_for('user_details', chat_id=chat_id))
+        if new_delivery_mode not in ALLOWED_DELIVERY_MODES:
+            flash(f"Недопустимый формат отправки: '{new_delivery_mode}'. Допустимые: {', '.join(ALLOWED_DELIVERY_MODES)}", "warning")
+            return redirect(url_for('user_details', chat_id=chat_id))
 
+        # Получаем текущие темы пользователя, чтобы проверить существование старой темы и ее режим
+        user_subjects_tuples = db_manager.get_user_subjects(chat_id)
+        current_subject_info = None
+        for s_name, s_mode in user_subjects_tuples:
+            if s_name == old_subject_name:
+                current_subject_info = {'name': s_name, 'mode': s_mode}
+                break
+
+        if not current_subject_info:
+            logger.warning(f"Subject '{old_subject_name}' not found for user {chat_id} during edit attempt.")
+            flash(f"Редактируемая тема '{old_subject_name}' не найдена для этого пользователя. Возможно, она была изменена или удалена.", "danger")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+        # Определяем, что изменилось
+        name_changed = (old_subject_name != new_subject_name)
+        mode_changed = (current_subject_info['mode'] != new_delivery_mode)
+
+        logger.info(f"Editing subject for {chat_id}: old='{old_subject_name}', new='{new_subject_name}', old_mode='{current_subject_info['mode']}', new_mode='{new_delivery_mode}'. Name changed: {name_changed}, Mode changed: {mode_changed}")
+
+        if not name_changed and not mode_changed:
+            flash(f"Изменений для темы '{old_subject_name}' не было.", "info")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+        # --- Логика обновления ---
+        success = False
+        action_description = []
+
+        # 1. Обработка изменения ИМЕНИ (может включать и изменение режима)
+        if name_changed:
+            # Проверка на дубликаты НОВОГО имени у ДРУГИХ пользователей
+            duplicate_subjects = check_duplicate_subjects([new_subject_name], chat_id)
             if duplicate_subjects and not confirm_duplicate:
-                flash(f"Тема '{new_subject}' уже существует у другого пользователя. Вы хотите продолжить?", "warning")
-                return render_template('confirm_edit_subject.html',
-                                       old_subject=old_subject,
-                                       new_subject=new_subject,
+                # Возвращаем шаблон подтверждения (нужно убедиться, что он есть или создать)
+                flash(f"Тема '{new_subject_name}' уже существует у другого пользователя. Подтвердите действие.", "warning")
+                # Передаем все необходимые данные для рендеринга формы подтверждения
+                delivery_modes_config = { # Конфиг нужен для селекта в шаблоне подтверждения
+                    "options": sorted(list(ALLOWED_DELIVERY_MODES)), "default": DEFAULT_DELIVERY_MODE,
+                    "display_map": { DELIVERY_MODE_TEXT: 'Только текст', DELIVERY_MODE_HTML: 'HTML', DELIVERY_MODE_SMART: 'Авто (Smart)', DELIVERY_MODE_PDF: 'PDF' }
+                }
+                return render_template('confirm_edit_subject.html', # Убедитесь, что этот шаблон есть
+                                       old_subject=old_subject_name,
+                                       new_subject=new_subject_name,
+                                       new_delivery_mode=new_delivery_mode,
                                        chat_id=chat_id,
-                                       user_role=session.get('user_role', 'viewer'))
+                                       user_role=session.get('user_role', 'viewer'),
+                                       delivery_modes_config=delivery_modes_config)
 
-        # Удаляем старую тему и добавляем новую
-        if db_manager.delete_subject(chat_id, old_subject) and db_manager.add_subject(chat_id, new_subject):
-            flash(f"Тема изменена с '{old_subject}' на '{new_subject}'", "success")
-            logger.info(f"Изменена тема с '{old_subject}' на '{new_subject}' для пользователя {chat_id}")
+            # Проверка, не пытается ли пользователь переименовать тему в имя, которое УЖЕ ЕСТЬ у НЕГО ЖЕ
+            # (кроме случая, когда old_subject_name == new_subject_name, что уже обработано)
+            existing_new_name = any(s_name == new_subject_name for s_name, s_mode in user_subjects_tuples)
+            if existing_new_name:
+                 flash(f"Тема с именем '{new_subject_name}' уже существует у этого пользователя.", "danger")
+                 return redirect(url_for('user_details', chat_id=chat_id))
 
-            # Логирование действия
+
+            # Используем стратегию delete/add для переименования + обновление режима
+            logger.info(f"Attempting rename: Deleting '{old_subject_name}', Adding '{new_subject_name}' with mode '{new_delivery_mode}' for {chat_id}")
+            if db_manager.delete_subject(chat_id, old_subject_name):
+                 # Добавляем с НУЖНЫМ режимом сразу (если add_subject это позволяет, иначе см. ниже)
+                 # Предположим, add_subject принимает режим:
+                 # if db_manager.add_subject(chat_id, new_subject_name, delivery_mode=new_delivery_mode):
+                 # Если add_subject НЕ принимает режим:
+                 if db_manager.add_subject(chat_id, new_subject_name): # Добавит с дефолтным режимом
+                     if db_manager.update_subject_delivery_mode(chat_id, new_subject_name, new_delivery_mode):
+                         success = True
+                         action_description.append(f"Тема переименована в '{new_subject_name}'")
+                         if mode_changed: # Если режим тоже менялся
+                             action_description.append(f"формат установлен на '{new_delivery_mode}'")
+                         else: # Если менялось только имя
+                             action_description.append(f"формат оставлен '{new_delivery_mode}'")
+                     else:
+                        logger.error(f"Failed to update mode for renamed subject '{new_subject_name}' for {chat_id}")
+                        flash(f"Тема переименована в '{new_subject_name}', но НЕ удалось установить формат '{new_delivery_mode}'.", "warning")
+                        # Успех частичный, но тему переименовали
+                        success = True # Считаем успехом переименования
+                        action_description.append(f"Тема переименована в '{new_subject_name}'")
+                        action_description.append(f"ошибка установки формата '{new_delivery_mode}'")
+
+                 else:
+                     logger.error(f"Failed to add new subject '{new_subject_name}' after deleting '{old_subject_name}' for {chat_id}")
+                     flash(f"Ошибка: Удалена старая тема '{old_subject_name}', но НЕ удалось добавить новую '{new_subject_name}'.", "danger")
+                     # Попытка восстановления старой темы (может быть неточной, если режим был не дефолтным)
+                     # db_manager.add_subject(chat_id, old_subject_name)
+            else:
+                logger.error(f"Failed to delete old subject '{old_subject_name}' during rename for {chat_id}")
+                flash(f"Ошибка: Не удалось удалить старую тему '{old_subject_name}' для переименования.", "danger")
+
+        # 2. Обработка изменения ТОЛЬКО режима (имя не менялось)
+        elif mode_changed:
+            logger.info(f"Attempting mode update only for '{old_subject_name}' to '{new_delivery_mode}' for {chat_id}")
+            if db_manager.update_subject_delivery_mode(chat_id, old_subject_name, new_delivery_mode):
+                success = True
+                action_description.append(f"Формат отправки для '{old_subject_name}' изменен на '{new_delivery_mode}'")
+            else:
+                logger.error(f"Failed to update delivery mode for '{old_subject_name}' for {chat_id}")
+                flash(f"Не удалось изменить формат отправки для темы '{old_subject_name}'.", "danger")
+
+        # --- Завершение операции ---
+        if success:
+            final_message = " ".join(action_description)
+            flash(f"Успешно: {final_message}", "success")
+            logger.info(f"Subject edit successful for {chat_id}: {final_message}")
+             # Логирование действия
             if 'user_id' in session:
-                log_activity(db_manager, session['user_id'], f"edit_subject",
-                             request.remote_addr, f"chat_id={chat_id}, old={old_subject}, new={new_subject}")
-
-            # Полная инвалидация всех кэшей для обеспечения согласованности данных
+                 log_activity(db_manager, session['user_id'], "edit_subject", request.remote_addr,
+                              f"chat={chat_id}, old='{old_subject_name}', new='{new_subject_name}', mode='{new_delivery_mode}'")
+            # Полная инвалидация кэша
             invalidate_all_caches()
-
-        else:
-            flash(f"Не удалось изменить тему", "danger")
-            logger.warning(f"Не удалось изменить тему с '{old_subject}' на '{new_subject}' для пользователя {chat_id}")
+        # else:
+            # Сообщение об ошибке уже должно было быть отправлено через flash выше
 
         return redirect(url_for('user_details', chat_id=chat_id))
+
     except Exception as e:
-        logger.error(f"Ошибка при редактировании темы для пользователя {chat_id}: {e}", exc_info=True)
-        flash(f"Произошла ошибка: {e}", "danger")
+        logger.error(f"CRITICAL Exception during edit_subject for chat_id={chat_id}: {e}", exc_info=True)
+        flash(f"Произошла непредвиденная ошибка при редактировании темы: {e}", "danger")
         return redirect(url_for('user_details', chat_id=chat_id))
 
 

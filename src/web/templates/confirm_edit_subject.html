@@ -1,28 +1,51 @@
 {% extends 'base.html' %}
 
-{% block title %}Подтверждение действия | DEERAY TG BOT{% endblock %}
+{% block title %}Подтверждение редактирования темы | DEERAY TG BOT{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Подтверждение действия</h1>
-</div>
+<div class="user-details-page"> {# Используем тот же класс, что и на user_details для консистентности стилей #}
+    <div class="page-header">
+        <h1>Подтверждение редактирования темы</h1>
+        <a href="{{ url_for('user_details', chat_id=chat_id) }}" class="btn btn-neutral back-btn">
+            <span>◀</span> Назад к деталям пользователя
+        </a>
+    </div>
 
-<div class="panel">
-    <div class="panel-header">Дублирование темы</div>
-    <div class="panel-body">
-        <div class="alert alert-warning">
-            Тема '{{ new_subject }}' уже существует у другого пользователя. Вы хотите продолжить?
-        </div>
-        <form method="post" action="{{ url_for('edit_subject', chat_id=chat_id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="old_subject" value="{{ old_subject }}">
-            <input type="hidden" name="new_subject" value="{{ new_subject }}">
-            <input type="hidden" name="confirm_duplicate" value="true">
-            <div class="buttons-container">
-                <button type="submit" class="btn btn-warning">Да, продолжить</button>
-                <a href="{{ url_for('user_details', chat_id=chat_id) }}" class="btn btn-neutral">Отмена</a>
+    <div class="panel">
+        <div class="panel-header">Обнаружен дубликат темы</div>
+        <div class="panel-body">
+            <div class="alert alert-warning" role="alert">
+                <p>Тема '<strong>{{ new_subject }}</strong>' уже существует у другого пользователя.</p>
             </div>
-        </form>
+            <p>Вы уверены, что хотите изменить тему '<strong>{{ old_subject }}</strong>' на '<strong>{{ new_subject }}</strong>' для пользователя <strong>{{ chat_id }}</strong>?</p>
+
+            {% if new_delivery_mode %}
+            <p>При этом новый формат отправки для темы '<strong>{{ new_subject }}</strong>' будет установлен как:
+                <strong>
+                    {# Проверяем наличие delivery_modes_config, который должен передаваться из admin.py #}
+                    {% if delivery_modes_config and delivery_modes_config.display_map %}
+                        {{ delivery_modes_config.display_map.get(new_delivery_mode, new_delivery_mode) }}
+                    {% else %}
+                        {{ new_delivery_mode }} {# Фоллбэк, если delivery_modes_config не передан #}
+                    {% endif %}
+                </strong>.
+            </p>
+            {% endif %}
+
+            <form method="post" action="{{ url_for('edit_subject', chat_id=chat_id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="old_subject" value="{{ old_subject }}">
+                <input type="hidden" name="new_subject" value="{{ new_subject }}">
+                {# <<<<<<< ВАЖНО: передаем new_delivery_mode дальше >>>>>>> #}
+                <input type="hidden" name="new_delivery_mode" value="{{ new_delivery_mode }}">
+                <input type="hidden" name="confirm_duplicate" value="true">
+
+                <div class="form-actions mt-3"> {# Добавлен класс для отступов и группировки кнопок #}
+                    <button type="submit" class="btn btn-warning">Да, изменить и продолжить</button>
+                    <a href="{{ url_for('user_details', chat_id=chat_id) }}" class="btn btn-neutral">Отмена</a>
+                </div>
+            </form>
+        </div>
     </div>
 </div>
 {% endblock %}

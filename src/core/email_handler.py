@@ -37,7 +37,7 @@ DELIVERY_MODE_HTML = 'html'
 DELIVERY_MODE_SMART = 'smart'
 DELIVERY_MODE_PDF = 'pdf'
 DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
-
+ALLOWED_DELIVERY_MODES = {DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF}
 
 # --- НОВЫЙ КЛАСС: Контекстный менеджер для временных файлов ---
 class TemporaryFileManager:
@@ -92,18 +92,56 @@ class DelayedSendScheduler:
         self.worker_thread = None
         self._started = False
 
-    def schedule(self, delay_seconds: float, chat_id: str, email_data: Dict[str, Any]):
+    def schedule(self, delay_seconds: float, chat_id: str, email_data: Dict[str, Any], delivery_mode: str):
         """Добавляет задачу в очередь на отложенную отправку."""
         if not self._started:
-             logger.warning("Планировщик не запущен, задача не будет добавлена.")
-             return
+            logger.warning("Планировщик не запущен, задача не будет добавлена.")
+            return
 
         send_time = time.time() + delay_seconds
         with self.lock:
-            heapq.heappush(self.scheduled_tasks, (send_time, chat_id, email_data))
-            logger.debug(f"Задача для {chat_id} запланирована на {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(send_time))}")
-        # Сигнализируем рабочему потоку, что появилась новая задача
+            # Сохраняем delivery_mode вместе с остальными данными
+            heapq.heappush(self.scheduled_tasks, (send_time, chat_id, email_data, delivery_mode))
+            logger.debug(
+                f"Задача для {chat_id} (режим: {delivery_mode}) запланирована на {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(send_time))}")
         self.new_task_event.set()
+
+    # Изменена распаковка кортежа и вызов _send_to_telegram_now
+    def _worker_loop(self):
+        """Основной цикл рабочего потока планировщика."""
+        logger.info("Запущен рабочий поток планировщика отложенных отправок.")
+        while not self.stop_event.is_set():
+            wait_time = None
+            tasks_to_run = []
+
+            with self.lock:
+                now = time.time()
+                while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
+                    # Распаковываем кортеж, включая delivery_mode
+                    send_time, chat_id, email_data, delivery_mode = heapq.heappop(self.scheduled_tasks)
+                    tasks_to_run.append((chat_id, email_data, delivery_mode))  # Сохраняем режим
+                    logger.debug(
+                        f"Извлечена задача для {chat_id} (режим: {delivery_mode}), запланированная на {send_time:.2f}")
+
+                if self.scheduled_tasks:
+                    next_run_time = self.scheduled_tasks[0][0]
+                    wait_time = max(0, next_run_time - now)
+
+            if tasks_to_run:
+                logger.info(f"Запуск {len(tasks_to_run)} отложенных задач.")
+                for chat_id, email_data, delivery_mode in tasks_to_run:  # Распаковываем режим
+                    try:
+                        # Передаем delivery_mode в _send_to_telegram_now
+                        self.forwarder._send_to_telegram_now(chat_id, email_data, delivery_mode)
+                    except Exception as e:
+                        logger.error(
+                            f"Ошибка при выполнении отложенной задачи для {chat_id} (режим: {delivery_mode}): {e}",
+                            exc_info=True)
+
+            self.new_task_event.wait(timeout=wait_time)
+            self.new_task_event.clear()
+
+        logger.info("Рабочий поток планировщика отложенных отправок остановлен.")
 
     def _worker_loop(self):
         """Основной цикл рабочего потока планировщика."""
@@ -218,14 +256,11 @@ class EmailTelegramForwarder:
 
         self.reload_client_data()
 
-    # ... (методы reload_client_data, _get_mail_connection, connect_to_mail,
-    #      get_all_unseen_emails, decode_mime_header, extract_email_content,
-    #      mark_as_unread, extract_email_body, extract_attachments, clean_subject,
-    #      format_email_body, check_subject_match, _check_rate_limit - остаются без изменений) ...
-
-    def escape_markdown_v2(self, text: str) -> str:
+    @staticmethod
+    def escape_markdown_v2(text: str) -> str:
         """
         Экранирует специальные символы для режима parse_mode='MarkdownV2' Telegram.
+        (Статический метод)
 
         Args:
             text: Исходный текст.
@@ -234,50 +269,71 @@ class EmailTelegramForwarder:
             Текст с экранированными символами.
         """
         if not isinstance(text, str):
-            text = str(text)  # На случай если передали не строку
+            text = str(text)
 
-        # Символы, которые нужно экранировать в MarkdownV2
-        # _ * [ ] ( ) ~ ` > # + - = | { } . !
         escape_chars = r'_*[]()~`>#+-=|{}.!'
-        # Заменяем каждый спецсимвол на него же с предваряющим обратным слэшем
         return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
-
     def reload_client_data(self) -> None:
-        """Загрузка данных о клиентах из базы данных с оптимизацией кэширования."""
+        """
+        Загрузка данных о подписках (темы, подписчики, их статусы и режимы доставки) из БД.
+        Использует обновленный db_manager.get_all_subjects().
+        """
+        logger.info("Перезагрузка данных о подписках из базы данных...")
         try:
-            # Получаем все темы и связанные с ними chat_id и статусы
-            self.client_data = self.db_manager.get_all_subjects()
+            # Получаем данные в новой структуре:
+            # { 'Тема': [{'chat_id': id, 'enabled': bool, 'delivery_mode': str}, ...], ... }
+            all_subscriptions = self.db_manager.get_all_subjects()
+            self.client_data = all_subscriptions  # Сохраняем необработанные данные, если они понадобятся
 
-            # Предварительно обрабатываем шаблоны для быстрого сопоставления
+            # Предварительно обрабатываем данные для быстрого сопоставления тем
+            # Структура: { 'тема_lower': [{'pattern': ОригТема, 'chat_id': id, 'enabled': bool, 'delivery_mode': str}, ...] }
             self._subject_patterns = {}
-            for subject_pattern, clients in self.client_data.items():
-                subject_lower = subject_pattern.lower()
-                # --- ИСПРАВЛЕНИЕ: Убедимся, что clients это список словарей ---
-                if isinstance(clients, list):
-                    for client in clients:
-                        # Проверяем, что client это словарь и содержит 'enabled'
-                        if isinstance(client, dict) and client.get("enabled", False):
-                            if subject_lower not in self._subject_patterns:
-                                self._subject_patterns[subject_lower] = []
-                            self._subject_patterns[subject_lower].append((subject_pattern, client["chat_id"]))
-                        elif not isinstance(client, dict):
-                             logger.warning(f"Некорректный формат данных клиента для темы '{subject_pattern}': {client}")
-                else:
-                    logger.warning(f"Некорректный формат данных для темы '{subject_pattern}': {clients}")
+            processed_subscriptions = 0
+            enabled_subscriptions = 0
 
+            for subject_pattern, subscribers in all_subscriptions.items():
+                subject_lower = subject_pattern.lower()
+                if subject_lower not in self._subject_patterns:
+                    self._subject_patterns[subject_lower] = []
+
+                for subscriber_info in subscribers:
+                    processed_subscriptions += 1
+                    if subscriber_info.get("enabled", False):
+                        enabled_subscriptions += 1
+                        # Добавляем всю информацию, включая режим доставки
+                        self._subject_patterns[subject_lower].append({
+                            "pattern": subject_pattern,
+                            "chat_id": subscriber_info["chat_id"],
+                            "enabled": True,
+                            "delivery_mode": subscriber_info.get("delivery_mode", DEFAULT_DELIVERY_MODE)
+                            # Добавляем режим
+                        })
+                    # else: # Не добавляем неактивных подписчиков в _subject_patterns для оптимизации поиска
+                    #    pass
 
             unique_subjects = len(self.client_data)
-            total_records = sum(len(clients) for clients in self.client_data.values() if isinstance(clients, list)) # Безопасный подсчет
+            total_patterns = len(self._subject_patterns)  # Количество уникальных тем в нижнем регистре
 
-            # Получаем состояния всех пользователей
-            self.user_states = self.db_manager.get_all_users()
+            # Удаляем загрузку user_states, т.к. статус теперь получаем вместе с темами
+            # self.user_states = self.db_manager.get_all_users() # <-- УДАЛИТЬ ЭТУ СТРОКУ
 
-            logger.info(f"Загружено {unique_subjects} уникальных тем и {total_records} записей из базы данных")
+            logger.info(
+                f"Данные о подписках перезагружены: "
+                f"{unique_subjects} уникальных тем (ориг.), "
+                f"{total_patterns} паттернов (lower), "
+                f"{processed_subscriptions} всего записей подписок, "
+                f"{enabled_subscriptions} активных подписок."
+            )
+
         except Exception as e:
-            logger.error(f"Ошибка при загрузке данных о клиентах: {e}", exc_info=True)
-            # Если не удалось загрузить данные, продолжаем работу с имеющимися данными
-            logger.info("Продолжение работы с имеющимися данными клиентов")
+            logger.error(f"Критическая ошибка при перезагрузке данных о подписках: {e}", exc_info=True)
+            # Оставляем старые данные, если они есть
+            if not hasattr(self, '_subject_patterns') or not self._subject_patterns:
+                logger.warning("Не удалось загрузить данные и кэш пуст. Проверка почты может быть неэффективной.")
+                self._subject_patterns = {}  # Очищаем на всякий случай
+            else:
+                logger.warning("Используются устаревшие данные о подписках из-за ошибки загрузки.")
 
     def _get_mail_connection(self) -> imaplib.IMAP4_SSL:
         """
@@ -866,48 +922,97 @@ class EmailTelegramForwarder:
             truncated_body = body[:1000] + "..." if body and len(body) > 1000 else body if body else ""
             return f"⚠️ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
-    def check_subject_match(self, email_subject: str) -> List[Tuple[str, str]]:
-        """ Проверка соответствия темы письма шаблонам клиентов. """
-        # ... (без изменений) ...
-        matching_subjects = []
+    def check_subject_match(self, email_subject: str) -> List[Dict[str, Any]]:
+        """
+        Проверка соответствия темы письма шаблонам подписчиков.
+        Возвращает список словарей с данными совпавших *активных* подписок.
+
+        Args:
+            email_subject: Очищенная тема письма.
+
+        Returns:
+            Список словарей: [{'pattern': str, 'chat_id': str, 'delivery_mode': str}, ...]
+            Возвращаются только активные подписки (enabled=True).
+        """
+        matching_subscriptions = []
         # Проверяем, что email_subject строка
         if not isinstance(email_subject, str):
-             logger.warning(f"Некорректный тип темы письма: {type(email_subject)}. Преобразование в строку.")
-             email_subject = str(email_subject)
+            logger.warning(f"Некорректный тип темы письма: {type(email_subject)}. Преобразование в строку.")
+            email_subject = str(email_subject)
 
         email_subject_lower = email_subject.lower()
-        processed_patterns = set() # Чтобы не добавлять дубликаты из-за подстрок
+        processed_chat_ids_for_subject = {}  # {chat_id: delivery_mode} - для дедупликации
 
-        # Сначала проверяем точные совпадения (быстрее)
-        if email_subject_lower in self._subject_patterns:
-            for pattern, chat_id in self._subject_patterns[email_subject_lower]:
-                 match_tuple = (pattern, chat_id)
-                 if match_tuple not in processed_patterns:
-                      matching_subjects.append(match_tuple)
-                      processed_patterns.add(match_tuple)
-
-        # Затем проверяем вхождения подстрок (медленнее)
-        # TODO: Оптимизация - если точное совпадение найдено, нужно ли искать подстроки?
-        #       Зависит от требований. Пока оставляем как есть.
+        # Проверяем совпадения (и точные, и по подстрокам)
+        # Итерируем по self._subject_patterns, который содержит только активные подписки
         for pattern_lower, patterns_data in self._subject_patterns.items():
-            # Пропускаем шаблоны, которые уже проверены на точное совпадение
+            is_match = False
+            # Сначала проверяем точное совпадение (быстрее)
             if pattern_lower == email_subject_lower:
-                continue
+                is_match = True
+            # Затем проверяем вхождение подстроки (медленнее)
+            elif pattern_lower in email_subject_lower:
+                is_match = True
 
-            # Проверяем, является ли шаблон подстрокой темы письма
-            if pattern_lower in email_subject_lower:
-                for pattern, chat_id in patterns_data:
-                     match_tuple = (pattern, chat_id)
-                     if match_tuple not in processed_patterns:
-                          matching_subjects.append(match_tuple)
-                          processed_patterns.add(match_tuple)
+            if is_match:
+                # patterns_data - это список словарей {'pattern':..., 'chat_id':..., 'enabled':True, 'delivery_mode':...}
+                for subscription_info in patterns_data:
+                    chat_id = subscription_info['chat_id']
+                    delivery_mode = subscription_info['delivery_mode']
+                    original_pattern = subscription_info['pattern']  # Оригинальный шаблон темы
 
-        if matching_subjects:
-            logger.info(f"Тема '{email_subject}' совпала с {len(matching_subjects)} шаблонами.")
+                    # --- Дедупликация по chat_id ---
+                    # Если для этого chat_id уже найдено совпадение (возможно, по другому шаблону),
+                    # выбираем более специфичный шаблон (более длинный).
+                    # Если длины равны, оставляем первый найденный режим.
+                    if chat_id in processed_chat_ids_for_subject:
+                        existing_match_index = -1
+                        for i, existing_match in enumerate(matching_subscriptions):
+                            if existing_match['chat_id'] == chat_id:
+                                existing_match_index = i
+                                break
+
+                        if existing_match_index != -1:
+                            existing_pattern = matching_subscriptions[existing_match_index]['pattern']
+                            # Если новый шаблон длиннее, заменяем старый
+                            if len(original_pattern) > len(existing_pattern):
+                                logger.debug(
+                                    f"Дедупликация для {chat_id}: Замена шаблона '{existing_pattern}' на более специфичный '{original_pattern}'")
+                                matching_subscriptions[existing_match_index] = {
+                                    "pattern": original_pattern,
+                                    "chat_id": chat_id,
+                                    "delivery_mode": delivery_mode
+                                }
+                                # Обновляем режим в processed_chat_ids_for_subject на всякий случай
+                                processed_chat_ids_for_subject[chat_id] = delivery_mode
+                            else:
+                                logger.debug(
+                                    f"Дедупликация для {chat_id}: Совпадение по шаблону '{original_pattern}' проигнорировано из-за существующего '{existing_pattern}'")
+                        else:
+                            # Эта ветка не должна срабатывать, если chat_id есть в processed_chat_ids_for_subject
+                            logger.warning(f"Логическая ошибка дедупликации для {chat_id}")
+
+                    else:
+                        # Первое совпадение для этого chat_id
+                        match_data = {
+                            "pattern": original_pattern,
+                            "chat_id": chat_id,
+                            "delivery_mode": delivery_mode
+                        }
+                        matching_subscriptions.append(match_data)
+                        processed_chat_ids_for_subject[chat_id] = delivery_mode
+
+        if matching_subscriptions:
+            logger.info(f"Тема '{email_subject}' совпала с {len(matching_subscriptions)} активными подписками.")
+            # Логирование деталей совпадений (опционально, может быть слишком многословно)
+            # for match in matching_subscriptions:
+            #    logger.debug(f"  - Совпадение: ChatID={match['chat_id']}, Шаблон='{match['pattern']}', Режим='{match['delivery_mode']}'")
         else:
-            logger.debug(f"Тема '{email_subject}' не совпала ни с одним шаблоном.")
+            # Эта отладочная информация может быть излишней при нормальной работе
+            # logger.debug(f"Тема '{email_subject}' не совпала ни с одним активным шаблоном.")
+            pass
 
-        return matching_subjects
+        return matching_subscriptions
 
     def _check_rate_limit(self, chat_id: str) -> bool:
         """ Проверка ограничения частоты сообщений для конкретного чата. """
@@ -942,71 +1047,113 @@ class EmailTelegramForwarder:
 
             return True
 
-    def send_to_telegram(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
+    def send_to_telegram(self, chat_id: str, email_data: Dict[str, Any], delivery_mode: str) -> bool:
         """
         Точка входа для отправки письма. Проверяет rate limit и либо отправляет
         сразу (_send_to_telegram_now), либо ставит в очередь планировщика.
+        Режим доставки передается как аргумент.
+
+        Args:
+            chat_id: ID чата получателя.
+            email_data: Данные письма.
+            delivery_mode: Режим доставки для этой конкретной отправки.
+
+        Returns:
+            False если отправка отложена из-за rate limit, иначе результат _send_to_telegram_now.
         """
+        # Проверяем валидность режима перед отправкой/планированием
+        if delivery_mode not in ALLOWED_DELIVERY_MODES:
+            logger.error(
+                f"Невалидный режим '{delivery_mode}' передан в send_to_telegram для {chat_id}. Используется '{DEFAULT_DELIVERY_MODE}'.")
+            delivery_mode = DEFAULT_DELIVERY_MODE
+
         # Проверяем ограничение частоты
         if not self._check_rate_limit(chat_id):
             # Откладываем отправку, если лимит превышен
-            logger.warning(f"Rate limit достигнут для чата {chat_id}. Планирование отправки через 60 секунд.")
-            # Используем новый планировщик
-            self.delayed_sender.schedule(60.0, chat_id, email_data)
+            logger.warning(
+                f"Rate limit достигнут для чата {chat_id}. Планирование отправки через 60 секунд (режим: {delivery_mode}).")
+            # Используем планировщик, передавая ему email_data И delivery_mode
+            # Важно: Нужно убедиться, что DelayedSendScheduler и его _worker_loop
+            # правильно обрабатывают *третий* аргумент (delivery_mode) при вызове _send_to_telegram_now.
+            # Если нет, нужно будет адаптировать DelayedSendScheduler.
+            # ПРЕДПОЛАГАЕМ, что планировщик адаптирован или email_data содержит режим.
+            # БОЛЕЕ НАДЕЖНО: Передать режим явно. Адаптируем планировщик ниже.
+            self.delayed_sender.schedule(60.0, chat_id, email_data, delivery_mode)  # Передаем режим!
             return False  # Возвращаем False, так как отправка не произошла сейчас
 
         # Если лимит не превышен, отправляем немедленно
         try:
-            return self._send_to_telegram_now(chat_id, email_data)
+            # Передаем delivery_mode в функцию немедленной отправки
+            return self._send_to_telegram_now(chat_id, email_data, delivery_mode)
         except Exception as e:
-             logger.error(f"Непредвиденная ошибка при немедленной отправке в Telegram для {chat_id}: {e}", exc_info=True)
-             return False
+            logger.error(
+                f"Непредвиденная ошибка при немедленной отправке в Telegram для {chat_id} (режим: {delivery_mode}): {e}",
+                exc_info=True)
+            return False
 
-    def _send_to_telegram_now(self, chat_id: str, email_data: Dict[str, Any]) -> bool:
+    def _send_to_telegram_now(self, chat_id: str, email_data: Dict[str, Any], delivery_mode: str) -> bool:
         """
-        (Финальная версия PDF v2 + Авто-ширина + Улучшенный шрифт)
+        (Финальная версия PDF v2 + Авто-ширина + Улучшенный шрифт + Режим на уровне подписки)
         Непосредственная отправка данных письма в Telegram (Текст/HTML/PDF).
-        Для PDF генерируется свой HTML с извлечением данных и улучшенными стилями.
-        НЕ проверяет rate limit (за это отвечает DelayedSendScheduler).
+        Режим доставки ('text', 'html', 'smart', 'pdf') передается как аргумент.
+        НЕ проверяет rate limit.
         """
         # --- КОНСТАНТЫ РЕЖИМОВ ---
-        DELIVERY_MODE_TEXT = 'text'; DELIVERY_MODE_HTML = 'html'; DELIVERY_MODE_SMART = 'smart';
-        DELIVERY_MODE_PDF = 'pdf'; DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
-        TELEGRAM_MAX_LEN = 4096 # Макс. длина сообщения Telegram
+        TELEGRAM_MAX_LEN = 4096  # Макс. длина сообщения Telegram
+        logger.debug(f"Начало отправки (_send_to_telegram_now) для {chat_id}, режим: {delivery_mode}")
 
         try:
-            # --- 1. Получение режима доставки ---
-            user_delivery_mode = DEFAULT_DELIVERY_MODE
-            try:
-                if hasattr(self, 'db_manager') and self.db_manager:
-                    retrieved_mode = self.db_manager.get_user_delivery_mode(chat_id)
-                    if retrieved_mode in [DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF]:
-                        user_delivery_mode = retrieved_mode
-                    else: logger.warning(f"Некорректный режим '{retrieved_mode}' для {chat_id}, используем default.")
-                else: logger.warning(f"db_manager отсутствует для {chat_id}. Используется Default режим.")
-            except Exception as db_err: logger.error(f"Ошибка получения режима доставки для {chat_id}: {db_err}. Используем Default.", exc_info=True)
+            # --- 1. Получение режима доставки (УЖЕ ПЕРЕДАН КАК АРГУМЕНТ) ---
+            # Проверяем валидность переданного режима на всякий случай
+            if delivery_mode not in ALLOWED_DELIVERY_MODES:
+                logger.error(
+                    f"Получен неверный режим доставки '{delivery_mode}' для {chat_id}. Используется '{DEFAULT_DELIVERY_MODE}'.")
+                delivery_mode = DEFAULT_DELIVERY_MODE
+            user_delivery_mode = delivery_mode  # Используем переданное значение
 
             # --- 2. Подготовка контента ---
             body = email_data.get("body", "")
             content_type = email_data.get("content_type", "text/plain")
-            raw_html_body = email_data.get("raw_html_body") # Сырой HTML для PDF/HTML файла
-            formatted_body = self.format_email_body(body, content_type) # Очищенный текст для текстового режима
+            raw_html_body = email_data.get("raw_html_body")  # Сырой HTML для PDF/HTML файла
+            formatted_body = self.format_email_body(body, content_type)  # Очищенный текст для текстового режима
             has_attachments = bool(email_data.get("attachments"))
-            message_length = len(formatted_body) # Длина очищенного текста
+            message_length = len(formatted_body)  # Длина очищенного текста
 
             # --- 3. Определение стратегии отправки ---
-            should_send_file = False; file_format_to_send = None
-            if raw_html_body: # Если есть HTML версия письма
-                if user_delivery_mode == DELIVERY_MODE_HTML: should_send_file = True; file_format_to_send = 'html'
-                elif user_delivery_mode == DELIVERY_MODE_PDF: should_send_file = True; file_format_to_send = 'pdf'
-                elif user_delivery_mode == DELIVERY_MODE_SMART and message_length >= TELEGRAM_MAX_LEN:
+            should_send_file = False
+            file_format_to_send = None
+
+            if raw_html_body:  # Если есть HTML версия письма
+                if user_delivery_mode == DELIVERY_MODE_HTML:
+                    should_send_file = True
+                    file_format_to_send = 'html'
+                elif user_delivery_mode == DELIVERY_MODE_PDF:
+                    should_send_file = True
+                    file_format_to_send = 'pdf'
+                elif user_delivery_mode == DELIVERY_MODE_SMART:
                     # В умном режиме отправляем файл, если текст не влезает в сообщение
-                    should_send_file = True; file_format_to_send = 'pdf'
-                    logger.info(f"Smart режим ({chat_id}): Текст ({message_length} зн.) > лимита ({TELEGRAM_MAX_LEN}). Отправка как PDF.")
-            else: # Если HTML версии нет
-                if user_delivery_mode in [DELIVERY_MODE_HTML, DELIVERY_MODE_PDF]:
-                    logger.warning(f"Режим '{user_delivery_mode}' ({chat_id}) требует HTML, но его нет в письме. Отправка как текст.")
-                # В любом случае отправляем как текст, если нет HTML
+                    if message_length >= TELEGRAM_MAX_LEN:
+                        # Используем PDF как файл по умолчанию для SMART режима (как запрашивалось ранее)
+                        should_send_file = True
+                        file_format_to_send = 'pdf'
+                        logger.info(
+                            f"Smart режим ({chat_id}): Текст ({message_length} зн.) >= лимита ({TELEGRAM_MAX_LEN}). Отправка как PDF.")
+                    else:
+                        # Если текст влезает, smart режим отправляет текст
+                        should_send_file = False
+                        logger.info(
+                            f"Smart режим ({chat_id}): Текст ({message_length} зн.) < лимита ({TELEGRAM_MAX_LEN}). Отправка как текст.")
+                # Если user_delivery_mode == DELIVERY_MODE_TEXT, should_send_file остается False
+
+            else:  # Если HTML версии нет
+                if user_delivery_mode in [DELIVERY_MODE_HTML, DELIVERY_MODE_PDF, DELIVERY_MODE_SMART]:
+                    # Если выбран режим файла (или SMART, который мог бы выбрать файл), но HTML нет, логируем предупреждение
+                    if user_delivery_mode != DELIVERY_MODE_TEXT:  # Не логируем для text режима
+                        logger.warning(
+                            f"Режим '{user_delivery_mode}' для подписки ({chat_id}, тема: '{email_data.get('subject', 'N/A')}') требует HTML для отправки файла, но его нет в письме. Отправка будет как текст.")
+                # В любом случае (включая TEXT), если нет HTML, отправляем как текст
+                should_send_file = False
+                file_format_to_send = None  # Явно сбрасываем
 
             # --- 4. ОБРАБОТКА: ОТПРАВКА КАК PDF ФАЙЛ ---
             if should_send_file and file_format_to_send == 'pdf':
@@ -1937,43 +2084,53 @@ class EmailTelegramForwarder:
             logger.error(f"Непредвиденная ошибка при извлечении заголовка письма {msg_id.decode()}: {e}", exc_info=True)
             return None
 
-
     def _process_email_worker(self) -> None:
         """ Рабочий поток для обработки писем из очереди (отправка в Telegram). """
-        # ... (без изменений) ...
+        logger.info("Запущен рабочий поток обработки очереди email...")
         while not self.stop_event.is_set():
             try:
-                # Получаем задачу из очереди с таймаутом
                 try:
-                    email_data, matching_subjects = self.email_queue.get(timeout=1)
+                    # Получаем email_data и список совпавших подписок
+                    # matching_subscriptions теперь список словарей: [{'pattern':..., 'chat_id':..., 'delivery_mode':...}, ...]
+                    email_data, matching_subscriptions = self.email_queue.get(timeout=1)
                 except queue.Empty:
-                    continue # Если очередь пуста, просто проверяем stop_event и ждем дальше
+                    continue
 
-                if not email_data or not matching_subjects:
+                if not email_data or not matching_subscriptions:
                     logger.warning("Получены некорректные данные из очереди email_queue.")
                     self.email_queue.task_done()
                     continue
 
-                processed_chat_ids = set() # Для предотвращения дублирования отправок по разным шаблонам одному юзеру
-                # Обрабатываем письмо для каждого совпавшего чата
-                for subject_pattern, chat_id in matching_subjects:
-                     if chat_id in processed_chat_ids:
-                          logger.debug(f"Пропуск дублирующей отправки для chat_id {chat_id} (шаблон '{subject_pattern}')")
-                          continue
+                email_subject = email_data.get('subject', 'N/A')
+                logger.debug(
+                    f"Обработка письма '{email_subject}' для {len(matching_subscriptions)} подписок из очереди...")
 
-                     logger.info(f"Запуск отправки письма с темой '{email_data.get('subject', 'N/A')}' для чата {chat_id} (шаблон: '{subject_pattern}')")
-                     # Вызываем send_to_telegram, который сам решает - отправить сразу или отложить
-                     self.send_to_telegram(chat_id, email_data)
-                     processed_chat_ids.add(chat_id)
+                # Обрабатываем письмо для каждой совпавшей подписки
+                for subscription_info in matching_subscriptions:
+                    chat_id = subscription_info.get('chat_id')
+                    delivery_mode = subscription_info.get('delivery_mode')
+                    pattern = subscription_info.get('pattern', 'N/A')
 
-                # Отмечаем задачу как выполненную (один раз для всего пакета совпадений)
+                    if not chat_id or not delivery_mode:
+                        logger.warning(
+                            f"Некорректные данные подписки в очереди для письма '{email_subject}': {subscription_info}")
+                        continue
+
+                    logger.info(
+                        f"Запуск отправки письма '{email_subject}' для чата {chat_id} (шаблон: '{pattern}', режим: {delivery_mode})")
+                    # Вызываем send_to_telegram, передавая ему режим доставки для этой подписки
+                    self.send_to_telegram(chat_id, email_data, delivery_mode)
+                    # processed_chat_ids больше не нужен здесь, т.к. check_subject_match уже сделал дедупликацию
+
+                # Отмечаем задачу как выполненную (один раз для всего письма)
                 self.email_queue.task_done()
-                logger.debug("Задача из email_queue обработана.")
+                logger.debug(f"Задача для письма '{email_subject}' из email_queue обработана.")
 
             except Exception as e:
                 logger.error(f"Ошибка в рабочем потоке обработки писем (_process_email_worker): {e}", exc_info=True)
-                 # Небольшая пауза в случае ошибки, чтобы не загружать CPU
                 time.sleep(1)
+
+        logger.info("Рабочий поток обработки очереди email остановлен.")
 
 
     def _start_workers(self) -> None:
@@ -2016,99 +2173,151 @@ class EmailTelegramForwarder:
         self.workers = [] # Очищаем список в любом случае
         logger.info("Рабочие потоки обработки email остановлены.")
 
-
     def process_emails(self) -> None:
         """ Оптимизированная функция обработки писем. """
         logger.info("--- Начало цикла проверки почты ---")
         start_time = time.time()
 
         try:
-            # Повторная загрузка данных о клиентах
+            # Повторная загрузка данных о клиентах и подписках
             self.reload_client_data()
 
-            # Если нет активных клиентов/шаблонов, пропускаем
+            # Если нет активных шаблонов, пропускаем
+            # _subject_patterns теперь содержит только активные подписки
             if not self._subject_patterns:
-                logger.info("Нет активных шаблонов для проверки почты, пропускаем цикл.")
+                logger.info("Нет активных подписок для проверки почты, пропускаем цикл.")
+                # Закрываем неактивное соединение, если оно есть
+                with self._mail_lock:
+                    if self._mail_connection and (
+                            time.time() - self._last_connection_time > self._connection_idle_timeout):
+                        try:
+                            logger.debug("Закрытие неактивного почтового соединения в конце пустого цикла...")
+                            self._mail_connection.close()
+                            self._mail_connection.logout()
+                        except Exception as close_err:
+                            logger.warning(f"Ошибка при закрытии неактивного соединения: {close_err}")
+                        finally:
+                            self._mail_connection = None
                 return
 
             # Подключение к почтовому серверу
             try:
                 mail = self._get_mail_connection()
-                if not mail: # Если _get_mail_connection вернул None (маловероятно, но возможно)
+                if not mail:
                     logger.error("Не удалось получить соединение с почтовым сервером.")
                     return
             except Exception as conn_err:
-                 logger.error(f"Критическая ошибка при получении соединения с почтой: {conn_err}", exc_info=True)
-                 return # Прерываем цикл обработки, если не можем подключиться
+                logger.error(f"Критическая ошибка при получении соединения с почтой: {conn_err}", exc_info=True)
+                return
 
             # Получение непрочитанных писем
             msg_ids = self.get_all_unseen_emails(mail)
 
             if not msg_ids:
                 logger.info("Нет новых непрочитанных писем.")
+                # Закрываем неактивное соединение
+                # (Логика закрытия неактивного соединения уже есть в _get_mail_connection,
+                # но можно добавить и здесь для надежности, если цикл часто пустой)
                 return
 
             # Запускаем рабочие потоки, если они еще не запущены
-            if not self.workers:
+            # Проверяем не только список, но и живость потоков
+            if not self.workers or not all(w.is_alive() for w in self.workers):
+                logger.warning("Обнаружены незапущенные или завершившиеся email worker'ы. Перезапуск...")
+                self._stop_workers()  # На всякий случай останавливаем старые, если были
                 self._start_workers()
 
             emails_processed_count = 0
             notifications_potential = 0
             emails_to_mark_read = []
-            emails_to_mark_unread = [] # Письма, которые точно нужно оставить непрочитанными
+            emails_to_mark_unread = []
 
             # Обработка каждого письма
-            for msg_id in msg_ids:
+            for msg_id_bytes in msg_ids:
+                msg_id_str = msg_id_bytes.decode() if isinstance(msg_id_bytes, bytes) else str(msg_id_bytes)
                 try:
                     # Сначала получаем только тему
-                    subject = self.get_email_subject(mail, msg_id)
+                    subject = self.get_email_subject(mail, msg_id_bytes)
 
-                    if subject is None: # Если get_email_subject вернул None из-за ошибки
-                        logger.warning(f"Не удалось получить тему письма {msg_id.decode()}, пропускаем")
+                    if subject is None:
+                        logger.warning(f"Не удалось получить тему письма {msg_id_str}, пропускаем")
+                        # Не помечаем как прочитанное, т.к. не смогли обработать
+                        emails_to_mark_unread.append(msg_id_bytes)
                         continue
 
-                    # Проверка соответствия темы
-                    matching_subjects = self.check_subject_match(subject)
+                    # Проверка соответствия темы и получение списка активных подписок с режимами
+                    # matching_subscriptions: [{'pattern':..., 'chat_id':..., 'delivery_mode':...}, ...]
+                    matching_subscriptions = self.check_subject_match(subject)
 
-                    if matching_subjects:
-                        # Если есть совпадение, загружаем полное содержимое
-                        logger.info(f"Тема '{subject}' совпала. Извлечение полного письма {msg_id.decode()}...")
-                        email_data = self.extract_email_content(mail, msg_id)
+                    if matching_subscriptions:
+                        logger.info(
+                            f"Тема '{subject}' (письмо {msg_id_str}) совпала с {len(matching_subscriptions)} подписками. Извлечение полного письма...")
+                        email_data = self.extract_email_content(mail, msg_id_bytes)
 
                         if email_data:
                             emails_processed_count += 1
-                            notifications_potential += len(matching_subjects)
-                            # Добавляем в очередь для отправки
-                            self.email_queue.put((email_data, matching_subjects))
-                            emails_to_mark_read.append(msg_id)
-                            logger.debug(f"Письмо {msg_id.decode()} добавлено в очередь на отправку.")
+                            notifications_potential += len(matching_subscriptions)
+                            # Добавляем в очередь email_data и список совпавших подписок
+                            self.email_queue.put((email_data, matching_subscriptions))
+                            emails_to_mark_read.append(msg_id_bytes)
+                            logger.debug(f"Письмо {msg_id_str} добавлено в очередь на отправку.")
                         else:
-                            logger.warning(f"Не удалось извлечь содержимое письма {msg_id.decode()} после совпадения темы. Оставляем непрочитанным.")
-                            # Если не удалось извлечь, лучше оставить непрочитанным
-                            emails_to_mark_unread.append(msg_id)
+                            logger.warning(
+                                f"Не удалось извлечь содержимое письма {msg_id_str} после совпадения темы. Оставляем непрочитанным.")
+                            emails_to_mark_unread.append(msg_id_bytes)
                     else:
                         # Если тема не совпала, оставляем непрочитанным
-                        # logger.info(f"Письмо {msg_id.decode()} с темой '{subject}' не соответствует шаблонам, оставляем непрочитанным.")
-                        # Явно помечаем как непрочитанное на случай, если PEEK изменил статус (хотя не должен)
-                        emails_to_mark_unread.append(msg_id)
+                        # logger.debug(f"Письмо {msg_id_str} с темой '{subject}' не соответствует шаблонам, оставляем непрочитанным.")
+                        emails_to_mark_unread.append(msg_id_bytes)
 
                 except Exception as loop_err:
-                    logger.error(f"Ошибка при обработке письма {msg_id.decode()} в цикле: {loop_err}", exc_info=True)
+                    logger.error(f"Ошибка при обработке письма {msg_id_str} в цикле: {loop_err}", exc_info=True)
+                    # Стараемся оставить непрочитанным при ошибке
+                    if msg_id_bytes not in emails_to_mark_unread:
+                        emails_to_mark_unread.append(msg_id_bytes)
                     # Стараемся продолжить обработку следующих писем
 
-            # Отмечаем письма как прочитанные (те, что были обработаны)
+            # Отмечаем письма как прочитанные (те, что были успешно поставлены в очередь)
             if emails_to_mark_read:
-                 logger.info(f"Пометка {len(emails_to_mark_read)} писем как прочитанных...")
-                 for msg_id in emails_to_mark_read:
-                     self.mark_as_read(mail, msg_id)
+                logger.info(f"Пометка {len(emails_to_mark_read)} писем как прочитанных...")
+                # Группируем ID для одной команды STORE, если возможно
+                # Преобразуем bytes в str для join
+                ids_str = b','.join(emails_to_mark_read)
+                if ids_str:
+                    try:
+                        status, _ = mail.store(ids_str, '+FLAGS', '\\Seen')
+                        if status != 'OK':
+                            logger.warning(
+                                f"Не удалось пометить все письма ({len(emails_to_mark_read)} шт.) как прочитанные (статус: {status}). Попытка по одному...")
+                            # Fallback: помечаем по одному
+                            for msg_id in emails_to_mark_read: self.mark_as_read(mail, msg_id)
+                    except Exception as store_err:
+                        logger.error(
+                            f"Ошибка при массовой пометке писем как прочитанных: {store_err}. Попытка по одному...")
+                        # Fallback: помечаем по одному
+                        for msg_id in emails_to_mark_read: self.mark_as_read(mail, msg_id)
+                else:
+                    logger.debug("Нет писем для пометки как прочитанных.")
 
             # Отмечаем письма как непрочитанные (те, что не совпали или не обработались)
-            if emails_to_mark_unread:
-                logger.info(f"Пометка {len(emails_to_mark_unread)} писем как непрочитанных...")
-                for msg_id in emails_to_mark_unread:
-                    self.mark_as_unread(mail, msg_id) # Убедимся, что они точно не прочитаны
-
-            # Не ждем завершения email_queue здесь, worker'ы работают асинхронно
+            # Дедуплицируем список перед пометкой
+            unique_unread_ids = list(set(emails_to_mark_unread))
+            if unique_unread_ids:
+                logger.info(f"Явная пометка {len(unique_unread_ids)} писем как непрочитанных...")
+                ids_str_unread = b','.join(unique_unread_ids)
+                if ids_str_unread:
+                    try:
+                        status, _ = mail.store(ids_str_unread, '-FLAGS', '\\Seen')
+                        if status != 'OK':
+                            logger.warning(
+                                f"Не удалось пометить все письма ({len(unique_unread_ids)} шт.) как непрочитанные (статус: {status}). Попытка по одному...")
+                            for msg_id in unique_unread_ids: self.mark_as_unread(mail, msg_id)
+                    except Exception as store_err:
+                        logger.error(
+                            f"Ошибка при массовой пометке писем как непрочитанных: {store_err}. Попытка по одному...")
+                        for msg_id in unique_unread_ids: self.mark_as_unread(mail, msg_id)
+                else:
+                    logger.debug("Нет писем для пометки как непрочитанных.")
 
             elapsed_time = time.time() - start_time
             logger.info(
@@ -2119,14 +2328,16 @@ class EmailTelegramForwarder:
 
         except Exception as e:
             logger.error(f"Критическая ошибка в цикле проверки почты: {e}", exc_info=True)
-            # Сбрасываем почтовое соединение при критической ошибке
+            # Сбрасываем почтовое соединение
             with self._mail_lock:
                 if self._mail_connection:
-                    try: self._mail_connection.close(); self._mail_connection.logout()
-                    except: pass
+                    try:
+                        self._mail_connection.close(); self._mail_connection.logout()
+                    except:
+                        pass
                     self._mail_connection = None
         finally:
-             logger.info("--- Конец цикла проверки почты ---")
+            logger.info("--- Конец цикла проверки почты ---")
 
 
     def test_connections(self) -> Dict[str, bool]:
