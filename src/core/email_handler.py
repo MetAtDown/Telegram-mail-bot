@@ -143,44 +143,6 @@ class DelayedSendScheduler:
 
         logger.info("Рабочий поток планировщика отложенных отправок остановлен.")
 
-    def _worker_loop(self):
-        """Основной цикл рабочего потока планировщика."""
-        logger.info("Запущен рабочий поток планировщика отложенных отправок.")
-        while not self.stop_event.is_set():
-            wait_time = None
-            tasks_to_run = []
-
-            with self.lock:
-                # Проверяем задачи, готовые к выполнению
-                now = time.time()
-                while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
-                    send_time, chat_id, email_data = heapq.heappop(self.scheduled_tasks)
-                    tasks_to_run.append((chat_id, email_data))
-                    logger.debug(f"Извлечена задача для {chat_id}, запланированная на {send_time:.2f}")
-
-                # Определяем время ожидания до следующей задачи
-                if self.scheduled_tasks:
-                    next_run_time = self.scheduled_tasks[0][0]
-                    wait_time = max(0, next_run_time - now)
-
-            # Выполняем готовые задачи вне блокировки
-            if tasks_to_run:
-                logger.info(f"Запуск {len(tasks_to_run)} отложенных задач.")
-                for chat_id, email_data in tasks_to_run:
-                    try:
-                        # Используем метод _send_to_telegram_now для фактической отправки
-                        self.forwarder._send_to_telegram_now(chat_id, email_data)
-                    except Exception as e:
-                        logger.error(f"Ошибка при выполнении отложенной задачи для {chat_id}: {e}", exc_info=True)
-
-            # Ожидаем следующей задачи или сигнала об остановке/новой задаче
-            # Если wait_time is None (нет задач), ждем бесконечно (но просыпаемся по событию)
-            self.new_task_event.wait(timeout=wait_time)
-            # Сбрасываем событие после пробуждения, чтобы не крутиться в цикле без дела
-            self.new_task_event.clear()
-
-        logger.info("Рабочий поток планировщика отложенных отправок остановлен.")
-
     def start(self):
         """Запускает рабочий поток планировщика."""
         if self.worker_thread is None or not self.worker_thread.is_alive():
