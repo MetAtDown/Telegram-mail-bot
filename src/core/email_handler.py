@@ -17,6 +17,8 @@ from email.header import decode_header
 from bs4 import BeautifulSoup, NavigableString, Tag
 import html
 import datetime
+import email.utils
+import email.parser
 from weasyprint import HTML as WeasyHTML
 from src.config import settings
 from src.utils.logger import get_logger
@@ -38,7 +40,7 @@ DELIVERY_MODE_PDF = 'pdf'
 DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 ALLOWED_DELIVERY_MODES = {DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF}
 
-# --- НОВЫЙ КЛАСС: Контекстный менеджер для временных файлов ---
+# Контекстный менеджер для временных файлов
 class TemporaryFileManager:
     """
     Контекстный менеджер для безопасного создания и автоматической очистки
@@ -76,7 +78,7 @@ class TemporaryFileManager:
         # распространялись дальше обычным образом.
         return False
 
-# --- НОВЫЙ КЛАСС: Планировщик отложенных отправок ---
+# Планировщик отложенных отправок
 class DelayedSendScheduler:
     """
     Управляет отложенными вызовами функции отправки сообщений,
@@ -105,7 +107,6 @@ class DelayedSendScheduler:
                 f"Задача для {chat_id} (режим: {delivery_mode}) запланирована на {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(send_time))}")
         self.new_task_event.set()
 
-    # Изменена распаковка кортежа и вызов _send_to_telegram_now
     def _worker_loop(self):
         """Основной цикл рабочего потока планировщика."""
         logger.info("Запущен рабочий поток планировщика отложенных отправок.")
@@ -116,7 +117,6 @@ class DelayedSendScheduler:
             with self.lock:
                 now = time.time()
                 while self.scheduled_tasks and self.scheduled_tasks[0][0] <= now:
-                    # Распаковываем кортеж, включая delivery_mode
                     send_time, chat_id, email_data, delivery_mode = heapq.heappop(self.scheduled_tasks)
                     tasks_to_run.append((chat_id, email_data, delivery_mode))  # Сохраняем режим
                     logger.debug(
@@ -130,7 +130,6 @@ class DelayedSendScheduler:
                 logger.info(f"Запуск {len(tasks_to_run)} отложенных задач.")
                 for chat_id, email_data, delivery_mode in tasks_to_run:  # Распаковываем режим
                     try:
-                        # Передаем delivery_mode в _send_to_telegram_now
                         self.forwarder._send_to_telegram_now(chat_id, email_data, delivery_mode)
                     except Exception as e:
                         logger.error(
@@ -179,7 +178,6 @@ class EmailTelegramForwarder:
         Args:
             db_manager: Экземпляр менеджера базы данных
         """
-        # ... (существующая загрузка настроек) ...
         self.email_account = settings.EMAIL_ACCOUNT
         self.password = settings.EMAIL_PASSWORD
         self.telegram_token = settings.TELEGRAM_TOKEN
@@ -212,7 +210,7 @@ class EmailTelegramForwarder:
         self._max_messages_per_minute = 20
         self.subject_prefixes = ["[deeray.com] ", "Re: ", "Fwd: ", "Fw: "]
 
-        # --- ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА ---
+        # ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА
         self.delayed_sender = DelayedSendScheduler(self, self.stop_event)
 
         self.reload_client_data()
@@ -268,10 +266,7 @@ class EmailTelegramForwarder:
                             "chat_id": subscriber_info["chat_id"],
                             "enabled": True,
                             "delivery_mode": subscriber_info.get("delivery_mode", DEFAULT_DELIVERY_MODE)
-                            # Добавляем режим
                         })
-                    # else: # Не добавляем неактивных подписчиков в _subject_patterns для оптимизации поиска
-                    #    pass
 
             unique_subjects = len(self.client_data)
             total_patterns = len(self._subject_patterns)  # Количество уникальных тем в нижнем регистре
@@ -289,7 +284,6 @@ class EmailTelegramForwarder:
 
         except Exception as e:
             logger.error(f"Критическая ошибка при перезагрузке данных о подписках: {e}", exc_info=True)
-            # Оставляем старые данные, если они есть
             if not hasattr(self, '_subject_patterns') or not self._subject_patterns:
                 logger.warning("Не удалось загрузить данные и кэш пуст. Проверка почты может быть неэффективной.")
                 self._subject_patterns = {}  # Очищаем на всякий случай
@@ -353,7 +347,6 @@ class EmailTelegramForwarder:
                     if status != 'OK':
                          # Используем другое исключение, чтобы отличить от сетевых ошибок
                         raise imaplib.IMAP4.abort(f"Соединение неактивно (статус {status})")
-                    # logger.debug("Соединение активно.")
                 except (imaplib.IMAP4.abort, imaplib.IMAP4.error, ConnectionResetError, BrokenPipeError) as e:
                     logger.warning(f"Соединение с почтовым сервером прервано: {e}. Пересоздание...")
                     try:
@@ -363,13 +356,8 @@ class EmailTelegramForwarder:
                          logger.warning(f"Ошибка при закрытии прерванного соединения: {close_err}")
                     finally:
                         self._mail_connection = None
-                    # Рекурсивный вызов для создания нового соединения (ОСТОРОЖНО с глубиной рекурсии)
-                    # Лучше сделать это итеративно в вызывающем коде или ограничить глубину
-                    # Но для простоты пока оставим так, т.к. ошибка не должна повторяться бесконечно
                     return self._get_mail_connection()
 
-
-            # Добавим проверку типа на всякий случай перед возвратом
             if not isinstance(self._mail_connection, imaplib.IMAP4_SSL):
                  logger.error("Критическая ошибка: _mail_connection не является объектом IMAP4_SSL после инициализации!")
                  raise TypeError("Не удалось получить действительное IMAP соединение")
@@ -420,7 +408,6 @@ class EmailTelegramForwarder:
     @lru_cache(maxsize=128)
     def decode_mime_header(self, header: str) -> str:
         """ Декодирование MIME-заголовков с кэшированием. """
-        # ... (без изменений) ...
         try:
             decoded_parts = decode_header(header)
             decoded_str = ""
@@ -446,11 +433,10 @@ class EmailTelegramForwarder:
 
     def extract_email_content(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> Optional[Dict[str, Any]]:
         """ Извлечение содержимого письма по его ID. """
-        # ... (без изменений, кроме логирования) ...
         try:
             # Получаем письмо целиком (используем PEEK, чтобы не менять флаг \Seen)
             logger.debug(f"Извлечение полного содержимого письма {msg_id.decode()}...")
-            status, msg_data = mail.fetch(msg_id, "(BODY.PEEK[])")
+            status, msg_data = mail.fetch(msg_id.decode() if isinstance(msg_id, bytes) else msg_id, "(BODY.PEEK[])")
             if status != "OK" or not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
                 logger.warning(f"Не удалось получить тело письма {msg_id.decode()} (статус: {status}, данные: {msg_data})")
                 return None
@@ -474,9 +460,6 @@ class EmailTelegramForwarder:
             # Извлекаем дату
             date_header = self.decode_mime_header(email_message.get("Date", ""))
 
-            # Проверяем совпадение по теме (перенесено из extract_email_content для ясности)
-            # Эта проверка теперь делается в process_emails перед вызовом extract_email_content
-
             # Извлекаем тело и HTML
             body, content_type, raw_html_body = self.extract_email_body(email_message)
             attachments = self.extract_attachments(email_message)
@@ -490,10 +473,8 @@ class EmailTelegramForwarder:
                 "body": body,
                 "content_type": content_type,
                 "raw_html_body": raw_html_body,
-                "id": msg_id, # Сохраняем ID как bytes
-                "attachments": attachments,
-                # "has_match": True, # Это поле больше не нужно здесь
-                # "matching_subjects": matching_subjects # Передаем отдельно
+                "id": msg_id,
+                "attachments": attachments
             }
         except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
              logger.error(f"Ошибка IMAP при извлечении содержимого письма {msg_id.decode()}: {e}")
@@ -510,18 +491,15 @@ class EmailTelegramForwarder:
 
     def mark_as_unread(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> None:
         """ Отметить письмо как непрочитанное. """
-        # ... (без изменений) ...
         for attempt in range(MAX_RETRIES):
             try:
                 logger.debug(f"Попытка {attempt+1} отметить письмо {msg_id.decode()} как непрочитанное...")
-                status, _ = mail.store(msg_id, '-FLAGS', '\\Seen')
+                status, _ = mail.store(msg_id.decode() if isinstance(msg_id, bytes) else msg_id, '-FLAGS', '\\Seen')
                 if status == 'OK':
                     logger.debug(f"Письмо {msg_id.decode()} успешно отмечено как непрочитанное")
                     return
                 else:
                     logger.warning(f"Не удалось отметить письмо {msg_id.decode()} как непрочитанное (статус: {status})")
-                    # Не повторяем попытку, если статус не OK, возможно проблема с ID или сервером
-
             except (imaplib.IMAP4.error, imaplib.IMAP4.abort) as e:
                 if attempt < MAX_RETRIES - 1:
                     wait_time = RETRY_DELAY * (2 ** attempt)
@@ -541,7 +519,6 @@ class EmailTelegramForwarder:
 
     def extract_email_body(self, email_message: email.message.Message) -> Tuple[str, str, Optional[str]]:
         """ Извлечение тела письма с сохранением raw HTML. """
-        # ... (без изменений) ...
         body = None
         content_type = "text/plain"
         html_body = None
@@ -551,7 +528,6 @@ class EmailTelegramForwarder:
         try:
             if email_message.is_multipart():
                 for part in email_message.walk():
-                    # Пропускаем вложения и multipart
                     if part.get_content_maintype() == 'multipart' or part.get('Content-Disposition', '').startswith('attachment'):
                         continue
 
@@ -625,7 +601,6 @@ class EmailTelegramForwarder:
 
     def extract_attachments(self, email_message: email.message.Message) -> List[Dict[str, Any]]:
         """ Извлечение вложений из письма. """
-        # ... (без изменений) ...
         attachments = []
         processed_parts = set() # Для предотвращения дублирования из-за walk()
 
@@ -640,7 +615,6 @@ class EmailTelegramForwarder:
 
                 # Пропускаем составные части и сообщения, если это не основной контент
                 if part.is_multipart(): continue
-                # if part.get_content_maintype() in ('multipart', 'message'): continue # Старая проверка
 
                 # Проверяем наличие имени файла и Content-Disposition
                 filename = part.get_filename()
@@ -649,8 +623,6 @@ class EmailTelegramForwarder:
                 # Более гибкая проверка на вложения
                 is_attachment = bool(filename) or ('attachment' in content_disposition)
 
-                # Пропускаем, если это не вложение (и не inline изображение/ресурс, который тоже может иметь filename)
-                # Может потребоваться более сложная логика, если нужно обрабатывать inline иначе
                 if not is_attachment and not ('inline' in content_disposition):
                     continue
 
@@ -662,7 +634,6 @@ class EmailTelegramForwarder:
                         # Предпочитаем filename* (RFC 5987) если есть, иначе обычный filename
                         encoded_name = filename_match.group(2) or filename_match.group(3)
                         if encoded_name:
-                             # Простая эвристика для декодирования (может потребовать улучшения)
                              if encoded_name.lower().startswith("utf-8''"):
                                  try: filename = email.utils.unquote(encoded_name.split("''", 1)[1])
                                  except: filename = encoded_name # Fallback
@@ -672,7 +643,6 @@ class EmailTelegramForwarder:
 
                     else: # Если имя не найдено в disposition
                         filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
-
 
                 # Если все проверки пройдены, но имя файла всё равно не определено (маловероятно)
                 if not filename:
@@ -712,9 +682,8 @@ class EmailTelegramForwarder:
 
     def clean_subject(self, subject: str) -> str:
         """ Очистка темы от префиксов. """
-        # ... (без изменений) ...
+        original_subject = subject
         try:
-            original_subject = subject
             # Проверяем, что subject это строка
             if not isinstance(subject, str):
                  subject = str(subject)
@@ -804,7 +773,7 @@ class EmailTelegramForwarder:
                                 elif element.name == 'a':
                                     # Обработка ссылок: "текст (URL)"
                                     href = element.get('href', '').strip()
-                                    link_text = element.get_text(separator=' ', strip=True)
+                                    link_text = ' '.join(element.stripped_strings)
                                     if href:
                                         if not link_text or link_text == href:
                                             current_cell_parts.append(href)
@@ -962,19 +931,13 @@ class EmailTelegramForwarder:
 
         if matching_subscriptions:
             logger.info(f"Тема '{email_subject}' совпала с {len(matching_subscriptions)} активными подписками.")
-            # Логирование деталей совпадений (опционально, может быть слишком многословно)
-            # for match in matching_subscriptions:
-            #    logger.debug(f"  - Совпадение: ChatID={match['chat_id']}, Шаблон='{match['pattern']}', Режим='{match['delivery_mode']}'")
         else:
-            # Эта отладочная информация может быть излишней при нормальной работе
-            # logger.debug(f"Тема '{email_subject}' не совпала ни с одним активным шаблоном.")
             pass
 
         return matching_subscriptions
 
     def _check_rate_limit(self, chat_id: str) -> bool:
         """ Проверка ограничения частоты сообщений для конкретного чата. """
-        # ... (без изменений) ...
         with self._rate_limit_lock:
             current_time = time.time()
 
@@ -1031,11 +994,6 @@ class EmailTelegramForwarder:
             logger.warning(
                 f"Rate limit достигнут для чата {chat_id}. Планирование отправки через 60 секунд (режим: {delivery_mode}).")
             # Используем планировщик, передавая ему email_data И delivery_mode
-            # Важно: Нужно убедиться, что DelayedSendScheduler и его _worker_loop
-            # правильно обрабатывают *третий* аргумент (delivery_mode) при вызове _send_to_telegram_now.
-            # Если нет, нужно будет адаптировать DelayedSendScheduler.
-            # ПРЕДПОЛАГАЕМ, что планировщик адаптирован или email_data содержит режим.
-            # БОЛЕЕ НАДЕЖНО: Передать режим явно. Адаптируем планировщик ниже.
             self.delayed_sender.schedule(60.0, chat_id, email_data, delivery_mode)  # Передаем режим!
             return False  # Возвращаем False, так как отправка не произошла сейчас
 
@@ -1147,7 +1105,6 @@ class EmailTelegramForwarder:
                         should_send_file = False
                         logger.info(
                             f"Smart режим ({chat_id}): Текст ({message_length} зн.) < лимита ({TELEGRAM_MAX_LEN}). Отправка как текст.")
-                # Если user_delivery_mode == DELIVERY_MODE_TEXT, should_send_file остается False
 
             else:  # Если HTML версии нет
                 if user_delivery_mode in [DELIVERY_MODE_HTML, DELIVERY_MODE_PDF, DELIVERY_MODE_SMART]:
@@ -1164,7 +1121,7 @@ class EmailTelegramForwarder:
                 logger.info(f"Генерация PDF для письма '{email_data.get('subject', '')}' ({chat_id})")
 
                 if WeasyHTML is None:
-                    logger.error(f"Невозможно создать PDF ({chat_id}): Библиотека WeasyPrint не импортирована или недоступна.");
+                    logger.error(f"Невозможно создать PDF ({chat_id}): Библиотека WeasyPrint не импортирована или недоступна.")
                     error_text = f"⚠️ Ошибка: PDF не создан (необходимая библиотека WeasyPrint не найдена на сервере)."
                     try: self._send_telegram_message_with_retry(self.bot.send_message, chat_id, error_text)
                     except Exception as fallback_err: logger.error(f"Не удалось отправить уведомление об ошибке WeasyPrint ({chat_id}): {fallback_err}")
@@ -1231,7 +1188,7 @@ class EmailTelegramForwarder:
                                     except Exception as e_inner:
                                         # Fallback: Если decode_contents не сработал, используем get_text
                                         logger.warning(f"Не удалось получить inner HTML ячейки (таблица {table_count}, {chat_id}), используем get_text: {e_inner}")
-                                        cell_text = cell.get_text(separator='\n', strip=True)
+                                        cell_text = '\n'.join(cell.stripped_strings)
                                         cell_inner_html = html.escape(cell_text).replace('\n', '<br/>')
 
                                     # Определяем тег (th или td)
@@ -1346,13 +1303,13 @@ class EmailTelegramForwarder:
                         </html>'''
 
                         # --- Конвертация HTML в PDF ---
-                        base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data.get('subject', 'email'))[:50]
+                        base_filename = re.sub(r'[^\w\-_. ]', '_', email_data.get('subject', 'email'))[:50]
                         # Добавляем дату в имя файла для уникальности и информативности
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
                         pdf_filename = f"{base_filename}_{timestamp}.pdf"
                         temp_file_path = os.path.join(temp_dir, pdf_filename)
 
-                        logger.debug(f"Рендеринг PDF в '{temp_file_path}' ({chat_id})...");
+                        logger.debug(f"Рендеринг PDF в '{temp_file_path}' ({chat_id})...")
                         WeasyHTML(string=final_pdf_html).write_pdf(temp_file_path)
                         pdf_size_mb = os.path.getsize(temp_file_path) / (1024 * 1024)
                         logger.debug(f"PDF файл '{temp_file_path}' успешно создан ({pdf_size_mb:.2f} МБ) ({chat_id}).")
@@ -1408,7 +1365,6 @@ class EmailTelegramForwarder:
                         except Exception as fallback_err:
                              logger.error(f"Не удалось отправить уведомление об ошибке PDF и/или вложения ({chat_id}): {fallback_err}")
                         return False # Ошибка при обработке PDF
-                # Конец with TemporaryFileManager
 
             # --- 5. ОБРАБОТКА: ОТПРАВКА КАК HTML ФАЙЛ ---
             elif should_send_file and file_format_to_send == 'html':
@@ -1417,7 +1373,7 @@ class EmailTelegramForwarder:
                 with TemporaryFileManager(prefix=f"html_{chat_id}_") as temp_dir:
                     try:
                         # --- Подготовка HTML файла ---
-                        base_filename = re.sub(r'[^\w\-_\. ]', '_', email_data.get('subject', 'email'))[:50]
+                        base_filename = re.sub(r'[^\w\-_. ]', '_', email_data.get('subject', 'email'))[:50]
                         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
                         html_filename = f"{base_filename}_{timestamp}.html"
                         temp_file_path = os.path.join(temp_dir, html_filename)
@@ -1504,7 +1460,6 @@ class EmailTelegramForwarder:
                         except Exception as fallback_err:
                              logger.error(f"Не удалось отправить уведомление об ошибке HTML и/или вложения ({chat_id}): {fallback_err}")
                         return False
-                 # --- КОНЕЦ БЛОКА HTML ---
 
             # --- 6. ОБРАБОТКА: ОТПРАВКА КАК ТЕКСТ ---
             else:
@@ -1523,9 +1478,7 @@ class EmailTelegramForwarder:
 
                     full_message_text_with_header = header + escaped_body
                     logical_separator = "________________"  # Наш логический разделитель
-                    # --- ИЗМЕНЕНИЕ: Экранируем ВИДИМЫЙ разделитель ---
                     visible_separator_md = self.escape_markdown_v2(logical_separator)
-                    # Экранируем разделитель для использования в split()
                     escaped_split_separator = self.escape_markdown_v2(logical_separator)
                     logger.debug(f"Используется экранированный разделитель для split: '{escaped_split_separator}'")
                     logger.debug(f"Видимый разделитель (экранированный): '{visible_separator_md}'")
@@ -1538,7 +1491,7 @@ class EmailTelegramForwarder:
                     final_message_parts = []
                     current_message_part = ""
 
-                    # --- ИЗМЕНЕНИЕ: Логика сборки сообщений с видимым сепаратором ---
+                    # Логика сборки сообщений с видимым сепаратором
                     for i, block in enumerate(logical_blocks_raw):
                         trimmed_block = block.strip()
 
@@ -1551,9 +1504,6 @@ class EmailTelegramForwarder:
                         separator_to_add_md = f"\n\n{visible_separator_md}\n\n" if needs_separator_before else ""
 
                         # 2. Проверяем, не слишком ли длинный САМ блок
-                        # При проверке длины блока учитываем возможный сепаратор ПЕРЕД ним,
-                        # если бы он отправлялся ОТДЕЛЬНО (хотя обычно сепаратор будет присоединен к предыдущему блоку)
-                        # Но безопаснее проверить блок сам по себе, без сепаратора.
                         if len(trimmed_block) > TELEGRAM_MAX_LEN:
                             logger.warning(
                                 f"Логический блок #{i + 1} (начинающийся с '{trimmed_block[:50]}...') "
@@ -1734,14 +1684,13 @@ class EmailTelegramForwarder:
                 logger.error(f"Не удалось отправить уведомление об общей ошибке ({chat_id}): {fallback_err}")
             return False # Критическая ошибка
 
-    # --- НОВЫЙ МЕТОД: Обертка для отправки с retry ---
+    # Обертка для отправки с retry
     def _send_telegram_message_with_retry(self, send_func, *args, **kwargs):
         """Отправляет сообщение через Telegram API с логикой повторных попыток."""
         last_exception = None
+        current_parse_mode = None
         for attempt in range(MAX_RETRIES):
             try:
-                # Убираем parse_mode если он None, т.к. send_document его не принимает явно в некоторых версиях
-                # Но если parse_mode='MarkdownV2' или другой, оставляем его.
                 current_parse_mode = kwargs.get('parse_mode')
                 if current_parse_mode is None and 'parse_mode' in kwargs:
                     del kwargs['parse_mode']
@@ -1751,11 +1700,8 @@ class EmailTelegramForwarder:
             except telebot.apihelper.ApiTelegramException as e:
                  last_exception = e
                  # Обрабатываем специфичные ошибки Telegram
-                 # --- УЛУЧШЕННАЯ ПРОВЕРКА ОШИБКИ ПАРСИНГА ---
                  if e.error_code == 400 and "can't parse entities" in str(e).lower():
                       problem_text_preview = "N/A"
-                      # Пытаемся получить текст из аргументов (обычно второй аргумент для send_message)
-                      # или из caption в kwargs
                       if len(args) > 1 and isinstance(args[1], str):
                            problem_text = args[1]
                            problem_text_preview = problem_text[:200] + ('...' if len(problem_text) > 200 else '')
@@ -1770,7 +1716,6 @@ class EmailTelegramForwarder:
                       )
                       # Прерываем попытки, так как повтор не поможет с неправильным форматированием
                       break
-                 # --- КОНЕЦ УЛУЧШЕННОЙ ПРОВЕРКИ ---
                  elif e.error_code == 400 and 'message is too long' in str(e).lower():
                       logger.error(f"Ошибка отправки: Сообщение слишком длинное для чата {args[0]} ({e})")
                       break # Прерываем, разбиение должно было произойти раньше
@@ -1782,7 +1727,6 @@ class EmailTelegramForwarder:
                       # Пытаемся получить время ожидания из ответа API
                       retry_after = RETRY_DELAY * (2 ** attempt) # Fallback
                       try:
-                          # result_json может быть недоступен или не содержать нужных данных
                           if hasattr(e, 'result_json') and isinstance(e.result_json, dict):
                               retry_after = e.result_json.get('parameters', {}).get('retry_after', retry_after)
                       except Exception: pass # Игнорируем ошибки парсинга retry_after
@@ -1826,8 +1770,6 @@ class EmailTelegramForwarder:
 
                 if not content:
                      logger.warning(f"Пустое содержимое для вложения '{filename}', пропускаем.")
-                     # Отправляем только текст (он уже экранирован и с заголовком)
-                     # Используем MarkdownV2, так как 'message' содержит заголовок в этом формате
                      self._send_telegram_message_with_retry(
                          self.bot.send_message, chat_id, message,
                          parse_mode='MarkdownV2', disable_web_page_preview=True
@@ -1871,8 +1813,6 @@ class EmailTelegramForwarder:
                 # Отправляем с retry
                 with open(temp_file_path, 'rb') as file_to_send:
                      # Устанавливаем parse_mode='MarkdownV2' для caption
-                     # visible_file_name нужен только для send_document
-                     # Для других методов (photo, video, audio) этот параметр не нужен или вызовет ошибку
                      if send_method == self.bot.send_document:
                          send_kwargs = {
                              "caption": caption,
@@ -1908,7 +1848,6 @@ class EmailTelegramForwarder:
 
     def split_text(self, text: str, max_length: int = 4096) -> List[str]:
         """ Разбивает текст на части. """
-        # ... (без изменений) ...
         parts = []
         safety_margin = 20 # Запас для префиксов и непредвиденных символов
         limit = max_length - safety_margin
@@ -2019,11 +1958,11 @@ class EmailTelegramForwarder:
 
     def mark_as_read(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> None:
         """ Отметить письмо как прочитанное. """
-        # ... (без изменений) ...
         for attempt in range(MAX_RETRIES):
             try:
                 logger.debug(f"Попытка {attempt+1} отметить письмо {msg_id.decode()} как прочитанное...")
-                status, data = mail.store(msg_id, '+FLAGS', '\\Seen')
+                msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+                status, data = mail.store(msg_id_str, '+FLAGS', '\\Seen')
                 if status == 'OK':
                     logger.debug(f"Письмо {msg_id.decode()} успешно отмечено как прочитанное.")
                     return
@@ -2053,7 +1992,8 @@ class EmailTelegramForwarder:
         try:
             # Получаем только заголовок письма
             logger.debug(f"Извлечение заголовка для письма {msg_id.decode()}...")
-            status, msg_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])") # Добавим From и Date для полноты
+            msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+            status, msg_data = mail.fetch(msg_id_str, "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])") # Добавим From и Date для полноты
             if status != "OK" or not msg_data or not msg_data[0] or not isinstance(msg_data[0], tuple) or len(msg_data[0]) < 2:
                 logger.warning(f"Не удалось получить заголовок письма {msg_id.decode()} (статус: {status}, данные: {msg_data})")
                 return None
@@ -2194,8 +2134,6 @@ class EmailTelegramForwarder:
 
     def _stop_workers(self) -> None:
         """ Остановка рабочих потоков обработки очереди email. """
-        # ... (без изменений) ...
-        # self.stop_event.set() # Не ставим здесь, т.к. он общий
         logger.info("Остановка рабочих потоков обработки email...")
         active_workers = []
         for worker in self.workers:
@@ -2224,7 +2162,6 @@ class EmailTelegramForwarder:
             self.reload_client_data()
 
             # Если нет активных шаблонов, пропускаем
-            # _subject_patterns теперь содержит только активные подписки
             if not self._subject_patterns:
                 logger.info("Нет активных подписок для проверки почты, пропускаем цикл.")
                 # Закрываем неактивное соединение, если оно есть
@@ -2257,8 +2194,6 @@ class EmailTelegramForwarder:
             if not msg_ids:
                 logger.info("Нет новых непрочитанных писем.")
                 # Закрываем неактивное соединение
-                # (Логика закрытия неактивного соединения уже есть в _get_mail_connection,
-                # но можно добавить и здесь для надежности, если цикл часто пустой)
                 return
 
             # Запускаем рабочие потоки, если они еще не запущены
@@ -2308,7 +2243,6 @@ class EmailTelegramForwarder:
                             emails_to_mark_unread.append(msg_id_bytes)
                     else:
                         # Если тема не совпала, оставляем непрочитанным
-                        # logger.debug(f"Письмо {msg_id_str} с темой '{subject}' не соответствует шаблонам, оставляем непрочитанным.")
                         emails_to_mark_unread.append(msg_id_bytes)
 
                 except Exception as loop_err:
@@ -2316,7 +2250,6 @@ class EmailTelegramForwarder:
                     # Стараемся оставить непрочитанным при ошибке
                     if msg_id_bytes not in emails_to_mark_unread:
                         emails_to_mark_unread.append(msg_id_bytes)
-                    # Стараемся продолжить обработку следующих писем
 
             # Отмечаем письма как прочитанные (те, что были успешно поставлены в очередь)
             if emails_to_mark_read:
@@ -2326,7 +2259,8 @@ class EmailTelegramForwarder:
                 ids_str = b','.join(emails_to_mark_read)
                 if ids_str:
                     try:
-                        status, _ = mail.store(ids_str, '+FLAGS', '\\Seen')
+                        ids_str_decoded = ids_str.decode() if isinstance(ids_str, bytes) else str(ids_str)
+                        status, _ = mail.store(ids_str_decoded, '+FLAGS', '\\Seen')
                         if status != 'OK':
                             logger.warning(
                                 f"Не удалось пометить все письма ({len(emails_to_mark_read)} шт.) как прочитанные (статус: {status}). Попытка по одному...")
@@ -2348,7 +2282,9 @@ class EmailTelegramForwarder:
                 ids_str_unread = b','.join(unique_unread_ids)
                 if ids_str_unread:
                     try:
-                        status, _ = mail.store(ids_str_unread, '-FLAGS', '\\Seen')
+                        ids_str_unread_decoded = ids_str_unread.decode() if isinstance(ids_str_unread, bytes) else str(
+                            ids_str_unread)
+                        status, _ = mail.store(ids_str_unread_decoded, '-FLAGS', '\\Seen')
                         if status != 'OK':
                             logger.warning(
                                 f"Не удалось пометить все письма ({len(unique_unread_ids)} шт.) как непрочитанные (статус: {status}). Попытка по одному...")
@@ -2383,7 +2319,6 @@ class EmailTelegramForwarder:
 
     def test_connections(self) -> Dict[str, bool]:
         """ Тестирование подключений к серверам. """
-        # ... (без изменений) ...
         results = {"mail": False, "telegram": False}
         logger.info("Тестирование соединений...")
 
@@ -2507,7 +2442,6 @@ class EmailTelegramForwarder:
 
 def main():
     """Основная функция для запуска форвардера."""
-    # ... (без изменений) ...
     forwarder = None
     try:
         logger.info("Инициализация EmailTelegramForwarder...")

@@ -30,7 +30,7 @@ DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 # --- ПРЕФИКСЫ ДЛЯ КАСТОМНЫХ CALLBACK_DATA ---
 REPORT_CONFIG_PREFIX = "rcfgidx_"  # Report Config by Index
 SUBJECT_MODE_PREFIX = "smode_"  # Subject Mode
-# Новые префиксы для суммаризации
+# префиксы для суммаризации
 SUBJECT_SUMMARY_PREFIX = "ssum_"  # Включение/выключение суммаризации для отчета
 SUBJECT_ORIG_PREFIX = "sorig_"  # Настройка отправки оригинала вместе с суммаризацией
 CLOSE_REPORTS_PREFIX = "close_reports"
@@ -1157,8 +1157,6 @@ class EmailBotHandler:
 
         if self.message_thread and self.message_thread.is_alive():
             logger.debug("Ожидание завершения потока сообщений...")
-            # Даем потоку сообщений шанс обработать оставшиеся сообщения перед тем, как его прервать
-            # Можно добавить логику для сохранения необработанных сообщений из очереди при остановке
             self.message_queue.join()  # Ждем, пока все элементы очереди не будут обработаны (task_done)
             self.message_thread.join(timeout=5)  # Затем ждем сам поток
             if self.message_thread.is_alive():

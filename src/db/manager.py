@@ -417,9 +417,6 @@ class DatabaseManager:
                         ADD COLUMN delivery_mode TEXT DEFAULT '{DEFAULT_DELIVERY_MODE}' NOT NULL CHECK (delivery_mode IN ('{DELIVERY_MODE_TEXT}', '{DELIVERY_MODE_HTML}', '{DELIVERY_MODE_SMART}', '{DELIVERY_MODE_PDF}'))
                         '''
                         cursor.execute(alter_query)
-                        # Важно: После ALTER TABLE ... ADD COLUMN с DEFAULT, SQLite в новых версиях
-                        # автоматически заполнит DEFAULT для существующих строк.
-                        # В очень старых версиях мог потребоваться UPDATE.
                         conn.commit()  # Коммит после ALTER TABLE
                         logger.info(
                             f"Столбец 'delivery_mode' успешно добавлен в 'subjects' с значением по умолчанию '{DEFAULT_DELIVERY_MODE}'.")
@@ -665,7 +662,6 @@ class DatabaseManager:
         logger.info("Выполняется принудительное обновление данных и сброс соединений")
         self._clear_cache()
 
-        # Add this line to trigger cross-process cache invalidation
         invalidate_caches()
 
         # Force close ALL connections in the pool
@@ -1116,16 +1112,12 @@ class DatabaseManager:
                 rows_affected = cursor.rowcount
                 logger.info(f"Добавлен/обновлен пользователь {chat_id}: затронуто строк: {rows_affected}")
 
-                # Очищаем соответствующие кэши (убраны кэши для delivery_mode)
+                # Очищаем соответствующие кэши
                 self._clear_cache(f"user_registered_{chat_id}")
                 self._clear_cache(f"user_status_{chat_id}")
                 self._clear_cache(f"user_notes_{chat_id}")
                 self._clear_cache("all_users")
-                # Эти кэши тоже сбрасываем, т.к. статус пользователя мог измениться
                 self._clear_cache("all_subjects")
-                # Устаревшие кэши
-                # self._clear_cache("all_client_data")
-                # self._clear_cache("active_users_with_subjects")
 
                 return rows_affected > 0
         except Exception as e:
@@ -1184,7 +1176,6 @@ class DatabaseManager:
                         # Очищаем кэши, связанные с темами
                         self._clear_cache(f"user_subjects_{chat_id}")
                         self._clear_cache("all_subjects")
-                        # self._clear_cache("all_client_data") # Устаревший кэш
                     else:
                         # Проверяем, может тема уже существует
                         cursor.execute("SELECT delivery_mode FROM subjects WHERE chat_id = ? AND subject = ?",
@@ -1246,8 +1237,6 @@ class DatabaseManager:
                         logger.info(f"Создан новый пользователь {chat_id} при массовом добавлении тем")
 
                     # Используем executemany для эффективности, если возможно,
-                    # но INSERT OR IGNORE с executemany не всегда возвращает корректный rowcount.
-                    # Поэтому делаем в цикле для точного подсчета.
                     for subject in subjects:
                         cursor.execute(
                             'INSERT OR IGNORE INTO subjects (chat_id, subject) VALUES (?, ?)',

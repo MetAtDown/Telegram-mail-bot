@@ -9,7 +9,6 @@ import queue
 import psutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, Any, Optional, List
 
 from src.utils.logger import get_logger
 from src.config import settings

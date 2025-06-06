@@ -1,7 +1,5 @@
 import hashlib
 import secrets
-from datetime import datetime
-from typing import Dict, Optional
 
 from src.utils.logger import get_logger
 from src.config import settings

@@ -1,10 +1,8 @@
-# src/core/bot_status.py
 import subprocess
-import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Tuple
 import psutil
 
 from src.utils.logger import get_logger
@@ -14,7 +12,6 @@ logger = get_logger("bot_status")
 
 # --- НАСТРОЙКИ ---
 # Получаем имя программы из настроек или используем 'bot' по умолчанию
-# Убедись, что в settings есть SUPERVISOR_BOT_PROGRAM_NAME или измени 'bot' на правильное имя
 SUPERVISOR_PROGRAM_NAME = getattr(settings, 'SUPERVISOR_BOT_PROGRAM_NAME', 'bot')
 # Путь к старому PID файлу (только для fallback метода)
 PID_FILE = Path(settings.DATA_DIR) / '.bot_pid'
@@ -198,8 +195,6 @@ def get_bot_status(bypass_cache=False) -> dict: # bypass_cache не исполь
             status_info['error'] = f"Ошибка supervisorctl status: {output}"
             status_info['status_source'] = 'supervisor_error'
             logger.error(status_info['error'])
-            # Здесь можно решить, возвращать ошибку или пробовать fallback
-            # Попробуем fallback:
             logger.warning("Попытка использовать резервный метод (PID).")
             status_info.update(get_bot_status_pid_fallback())
             # Добавляем информацию об исходной ошибке supervisor
@@ -239,7 +234,6 @@ def get_bot_status(bypass_cache=False) -> dict: # bypass_cache не исполь
         logger.debug(f"Найдена строка статуса Supervisor: {status_line}")
 
         # Определяем статус и извлекаем PID и uptime
-        # Пример: bot RUNNING pid 123, uptime 1:23:45
         parts = status_line.split()
         # Первый элемент - имя программы, второй - статус
         current_status = parts[1] if len(parts) > 1 else "UNKNOWN"
@@ -259,8 +253,6 @@ def get_bot_status(bypass_cache=False) -> dict: # bypass_cache не исполь
             try:
                 uptime_index = parts.index('uptime') + 1
                 status_info['uptime'] = " ".join(parts[uptime_index:])
-                # TODO: Реализовать парсинг строки uptime в секунды, если нужно
-                # status_info['uptime_seconds'] = _parse_supervisor_uptime(status_info['uptime'])
             except (ValueError, IndexError):
                 logger.warning(f"Не удалось извлечь uptime из строки статуса: {status_line}")
 
@@ -353,7 +345,6 @@ def get_bot_status_pid_fallback() -> dict:
                       status_info['running'] = False # Явно указываем, что это не тот процесс
             except (psutil.AccessDenied, OSError) as e:
                  status_info['error'] = f"Нет доступа к информации о процессе {pid}: {e}"
-                 # Не можем быть уверены, работает ли он, оставляем running=False
         else:
             status_info['error'] = f"Процесс с PID {pid} из файла не найден."
             # Удаляем старый PID файл
@@ -366,7 +357,6 @@ def get_bot_status_pid_fallback() -> dict:
     except ValueError:
         status_info['error'] = f"Некорректное значение PID в файле: {PID_FILE}"
     except FileNotFoundError:
-         # Уже проверили в начале, но на всякий случай
          status_info['error'] = f"PID файл не найден: {PID_FILE}"
     except (psutil.Error, IOError) as e:
         status_info['error'] = f"Ошибка доступа к процессу или файлу PID: {e}"

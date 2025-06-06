@@ -2,7 +2,6 @@ import re
 import time
 import os
 import secrets
-import gc
 from threading import Lock
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, abort
 from flask_wtf.csrf import CSRFProtect
@@ -14,7 +13,7 @@ from datetime import datetime, timedelta
 import math
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Callable, Dict, Any
+from typing import List, Optional, Callable
 import concurrent.futures
 import signal
 import sys
@@ -24,7 +23,7 @@ from src.db.manager import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVE
 from src.config import settings
 from src.utils.logger import get_logger
 from src.core.bot_status import get_bot_status, start_bot, stop_bot
-from src.db.tools import execute_query, get_table_list, get_table_info, get_common_queries, optimize_database, \
+from src.db.tools import execute_query, get_table_list, get_table_info, get_common_queries, \
     close_all_connections, clear_query_cache
 from src.db.manager import DatabaseManager
 from src.utils.cache_manager import invalidate_caches, is_cache_valid
@@ -596,11 +595,8 @@ def index():
             # Получение информации о пользователях
             user_states = db_manager.get_all_users()  # Этот метод остался
 
-            # --- ИЗМЕНЕНИЕ: Подсчет тем напрямую ---
             total_subjects = 0
             try:
-                # Выполняем простой COUNT(*) запрос к таблице subjects
-                # Используем execute_optimized_query для получения результата
                 result = db_manager.execute_optimized_query(
                     "SELECT COUNT(*) as count FROM subjects",
                     fetch_all=False  # Нам нужна только одна строка с результатом
@@ -611,7 +607,6 @@ def index():
                     logger.warning("Не удалось получить количество тем из БД для статистики.")
             except Exception as count_err:
                 logger.error(f"Ошибка при подсчете тем для статистики: {count_err}")
-            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
             # Подсчет статистики пользователей
             total_users = len(user_states)
@@ -659,7 +654,6 @@ def users():
             logger.debug("Запрос данных пользователей с количеством тем для админки...")
             users_data = []
             try:
-                # --- ИЗМЕНЕНИЕ: Получаем все данные одним запросом с JOIN и COUNT ---
                 query = """
                     SELECT
                         u.chat_id,
@@ -671,7 +665,6 @@ def users():
                     GROUP BY u.chat_id, u.status, u.notes
                     ORDER BY u.status DESC, u.chat_id  -- Сначала активные
                 """
-                # Используем execute_optimized_query
                 all_users_details = db_manager.execute_optimized_query(query)
                 logger.debug(f"Получено {len(all_users_details)} записей пользователей из БД.")
 
@@ -1688,7 +1681,7 @@ def bot_status_api():
 def optimize_db():
     """Запуск оптимизации базы данных"""
     try:
-        # Прямая оптимизация без сложного скрипта
+        # Прямая оптимизация
         script = """
 import os, sys, time, sqlite3, subprocess
 
@@ -2006,7 +1999,6 @@ def edit_summarization_prompt(prompt_id):
                                          user_role=session.get('user_role', 'viewer'))
 
             # Обновляем шаблон через db_manager
-            # В методе update_summarization_prompt уже есть проверка на единственный шаблон по умолчанию
             if db_manager.update_summarization_prompt(prompt_id, name, prompt_text, is_default):
                 # Инвалидация кэша
                 invalidate_all_caches()
@@ -2035,8 +2027,6 @@ def edit_summarization_prompt(prompt_id):
                 return redirect(url_for('edit_summarization_prompt', prompt_id=prompt_id))
 
         # GET запрос - загружаем данные шаблона для формы
-        # Здесь важно правильно передать структуру данных шаблона
-        # включая правильное имя атрибута для статуса по умолчанию
         return render_template('edit_summarization_prompt.html',
                              prompt=current_prompt,
                              user_role=session.get('user_role', 'viewer'))
