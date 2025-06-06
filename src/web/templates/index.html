@@ -47,10 +47,16 @@
         <div style="margin: 20px 0; display: flex; gap: 10px; flex-wrap: wrap;">
             <a href="{{ url_for('users') }}" class="btn btn-primary">Пользователи</a>
             <a href="{{ url_for('add_user') }}" class="btn btn-primary">Добавить пользователя</a>
+            {% if session.get('user_role') in ['admin', 'operator'] %}
+            <a href="{{ url_for('summarization_prompts') }}" class="btn btn-primary">Шаблоны суммаризации</a>
+            {% endif %}
             <a href="{{ url_for('sql_console') }}" class="btn btn-primary">SQL - Консоль</a>
-            <a href="{{ url_for('bot_status') }}" class="btn btn-primary">Статус бота</a>
+            {% if session.get('user_role') == 'admin' %}
+            <a href="{{ url_for('admin_users') }}" class="btn btn-primary">Администраторы</a>
+            <a href="{{ url_for('diagnostics') }}" class="btn btn-primary">Диагностика</a>
+            {% endif %}
         </div>
-        
+
         <h2>Чаво</h2>
         <p>Если вы впервые используете данный веб-интерфейс, прочитайте справку.</p>
         <a href="{{ url_for('help') }}" class="btn btn-primary" style="margin-top: 10px;">Справка</a>

@@ -1,0 +1,102 @@
+{% extends 'base.html' %}
+
+{% block title %}Редактировать шаблон суммаризации | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Редактирование шаблона суммаризации</h1>
+    <a href="{{ url_for('summarization_prompts') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> К списку шаблонов
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">
+        Редактирование шаблона #{{ prompt.id }}
+        {% if prompt.is_default %}
+        <span class="badge default-badge">По умолчанию</span>
+        {% endif %}
+    </div>
+    <div class="panel-body">
+        <div class="button-group-wrapper">
+            <!-- Основная форма редактирования -->
+            <form method="post" action="{{ url_for('edit_summarization_prompt', prompt_id=prompt.id) }}" class="main-form-edit" style="flex-grow: 1;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+                <div class="form-group">
+                    <label for="name" class="form-label">Название шаблона</label>
+                    <input type="text" name="name" id="name" class="form-control" value="{{ prompt.name }}" required>
+                    <div class="hint-text">Название должно кратко описывать назначение шаблона</div>
+                </div>
+
+                <div class="form-group">
+                    <label for="prompt_text" class="form-label">Текст запроса для ИИ</label>
+                    <textarea name="prompt_text" id="prompt_text" class="form-control" rows="8" required>{{ prompt.prompt_text }}</textarea>
+                    <div class="hint-text">
+                        Текст запроса будет передан модели ИИ вместе с текстом письма.
+                        Будьте конкретны в своих инструкциях.
+                    </div>
+                </div>
+                <div class="form-group">
+                    <div class="control-label">Установить как шаблон по умолчанию:</div>
+                    <div class="toggle-switch">
+                        <input type="checkbox" id="edit-is-default" name="is_default" class="toggle-switch-checkbox" value="true"
+                               {% if prompt.is_default_for_new_users %}checked{% endif %}
+                               {% if prompt.is_default_for_new_users %}disabled{% endif %}>
+                        <label for="edit-is-default" class="toggle-switch-label"></label>
+                        {% if prompt.is_default_for_new_users %}
+                        <!-- Скрытое поле для передачи значения, когда чекбокс отключен -->
+                        <input type="hidden" name="is_default" value="true">
+                        {% endif %}
+                    </div>
+                    <div class="hint-text">
+                        {% if prompt.is_default_for_new_users %}
+                            <strong>Этот шаблон установлен как шаблон по умолчанию.</strong>
+                            Чтобы изменить шаблон по умолчанию, установите другой шаблон как шаблон по умолчанию.
+                        {% else %}
+                            Если включено, этот шаблон будет использоваться для новых пользователей и при создании
+                            суммаризаций без указанного шаблона. Текущий шаблон по умолчанию будет переведен в обычный статус.
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Группа кнопок в одну линию -->
+                <div class="action-buttons">
+                    <div class="button-group">
+                        <button type="submit" class="btn btn-primary">Сохранить</button>
+                        <a href="{{ url_for('summarization_prompts') }}" class="btn btn-neutral">Отмена</a>
+
+                        {% if user_role == 'admin' %}
+                        <button type="button" class="btn btn-danger" onclick="document.getElementById('delete-form').submit();">Удалить</button>
+                        {% endif %}
+                    </div>
+                </div>
+            </form>
+
+            <!-- Скрытая форма для удаления -->
+            {% if user_role == 'admin' %}
+            <form id="delete-form" method="post" action="{{ url_for('delete_summarization_prompt', prompt_id=prompt.id) }}" style="display: none;"
+                  onsubmit="return confirm('Вы уверены, что хотите удалить этот шаблон? Это действие необратимо.');">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<style>
+/* Добавляем стили для правильного выравнивания кнопок */
+.button-group-wrapper {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+}
+.action-buttons {
+    margin-top: 20px;
+}
+.button-group {
+    display: flex;
+    gap: 10px;
+}
+</style>
+{% endblock %}

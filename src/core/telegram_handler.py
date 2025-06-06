@@ -4,11 +4,9 @@ import threading
 import time
 import queue
 import functools
-# from telebot.callback_data import CallbackData, CallbackDataFilter # УДАЛЕНО - не используем фабрики
-# from telebot.custom_filters import AdvancedCustomFilter # Если не используется, можно удалить
-from typing import Dict, Any, List, Optional, Set, Callable  # Оставляем, т.к. typing полезен
-from datetime import datetime, timedelta
-import logging  # Оставляем
+import gc
+from src.core.summarization import SummarizationManager
+from typing import Dict, List
 from src.core.email_handler import EmailTelegramForwarder
 from src.config import settings
 from src.utils.logger import get_logger
@@ -32,6 +30,12 @@ DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 # --- ПРЕФИКСЫ ДЛЯ КАСТОМНЫХ CALLBACK_DATA ---
 REPORT_CONFIG_PREFIX = "rcfgidx_"  # Report Config by Index
 SUBJECT_MODE_PREFIX = "smode_"  # Subject Mode
+# Новые префиксы для суммаризации
+SUBJECT_SUMMARY_PREFIX = "ssum_"  # Включение/выключение суммаризации для отчета
+SUBJECT_ORIG_PREFIX = "sorig_"  # Настройка отправки оригинала вместе с суммаризацией
+CLOSE_REPORTS_PREFIX = "close_reports"
+
+
 
 
 def with_retry(max_attempts: int = MAX_RETRIES, delay: int = RETRY_DELAY):
@@ -81,15 +85,12 @@ class EmailBotHandler:
         self.stop_event = threading.Event()
         self.message_queue = queue.Queue(maxsize=MAX_MESSAGE_QUEUE)
 
-        # --- ИЗМЕНЕНО: self.pending_responses удалено, если не используется где-то еще ---
-        # self.pending_responses = {}
 
-        self.client_data = {}  # Если это все еще нужно для чего-то, кроме статусов
+        self.client_data = {}
         self.client_data_timestamp = 0
         self.user_states = {}
         self.user_states_timestamp = 0
 
-        # --- ДОБАВЛЕНО: Кэш для контекста сообщений с кнопками ---
         self.message_report_context_cache: Dict[
             int, List[tuple[str, str]]] = {}  # message_id -> list of (subject, mode)
         self.MAX_CONTEXT_CACHE_SIZE = 50  # Максимальный размер кэша контекста
@@ -115,6 +116,15 @@ class EmailBotHandler:
         except Exception as e:
             logger.error(f"Ошибка при инициализации Telegram бота: {e}")
             raise
+
+    def _clear_cache_for_subject(self, chat_id: str, subject: str) -> None:
+        """Очищает кэш для конкретной темы пользователя"""
+        cache_key = f'subject_summarization_settings_{chat_id}_{subject}'
+        self.db_manager._clear_cache(cache_key)
+
+        # Также очищаем кэш статуса суммаризации
+        cache_key_status = f'subject_summarization_status_{chat_id}_{subject}'
+        self.db_manager._clear_cache(cache_key_status)
 
     def reload_client_data(self) -> None:
         current_time = time.time()
@@ -150,7 +160,6 @@ class EmailBotHandler:
             raise
 
     def get_main_menu_keyboard(self) -> types.ReplyKeyboardMarkup:
-        # Кэширование клавиатуры можно оставить, если она не меняется динамически часто
         if hasattr(self, '_main_menu_keyboard_cached'):
             return self._main_menu_keyboard_cached
 
@@ -191,6 +200,14 @@ class EmailBotHandler:
                 get_button_text(mode_code, mode_text),
                 callback_data=callback_data_str
             ))
+
+        # Добавляем кнопку "Назад к настройкам отчета"
+        back_button = types.InlineKeyboardButton(
+            "⬅️ Назад к настройкам отчета",
+            callback_data=f"{REPORT_CONFIG_PREFIX}{report_index}"
+        )
+        keyboard.add(back_button)
+
         return keyboard
 
     def get_status_message(self, chat_id: str, user_name: str) -> str:
@@ -224,7 +241,6 @@ class EmailBotHandler:
         """Очищает старые записи из кэша контекста, если он превышает лимит."""
         with self.lock:  # Защита доступа к кэшу
             if len(self.message_report_context_cache) > self.MAX_CONTEXT_CACHE_SIZE:
-                # Удаляем самые старые элементы (FIFO для dict в Python 3.7+)
                 num_to_remove = len(self.message_report_context_cache) - self.MAX_CONTEXT_CACHE_SIZE
                 keys_to_remove = list(self.message_report_context_cache.keys())[:num_to_remove]
                 for key in keys_to_remove:
@@ -276,6 +292,13 @@ class EmailBotHandler:
                     DELIVERY_MODE_TEXT: "Текст", DELIVERY_MODE_HTML: "HTML",
                     DELIVERY_MODE_PDF: "PDF", DELIVERY_MODE_SMART: "Авто (Текст/PDF)"}
                 keyboard = types.InlineKeyboardMarkup(row_width=1)
+                
+                # Получаем информацию о суммаризации для отчетов
+                summarization_manager = SummarizationManager()
+                subjects_with_summary = {}
+                
+                for subject, _ in subjects_with_modes:
+                    subjects_with_summary[subject] = summarization_manager.get_report_summarization_status(chat_id, subject)
 
                 for index, (subject, mode) in enumerate(subjects_with_modes):
                     safe_subject_content = EmailTelegramForwarder.escape_markdown_v2(subject)
@@ -283,11 +306,16 @@ class EmailBotHandler:
                     mode_text_display = mode_display_map.get(mode, mode.capitalize())
                     mode_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Режим:")
                     mode_line = f"   {mode_prefix_escaped} `{mode_text_display}`"
-                    response_text += f"{subject_line}\n{mode_line}\n\n"
+                    
+                    # Добавляем информацию о суммаризации
+                    summary_status = subjects_with_summary.get(subject, False)
+                    summary_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Саммари:")
+                    summary_line = f"   {summary_prefix_escaped} `{'✅' if summary_status else '❌'}`"
+                    
+                    response_text += f"{subject_line}\n{mode_line}\n{summary_line}\n\n"
 
                     button_text_subject = f"{subject[:35]}{'...' if len(subject) > 35 else ''}"  # Немного короче для кнопки
 
-                    # callback_data: "rcfgidx_<index>"
                     callback_data_str = f"{REPORT_CONFIG_PREFIX}{index}"
                     logger.debug(
                         f"Для отчета '{subject}' (индекс {index}) callback_data='{callback_data_str}' (длина {len(callback_data_str)})")
@@ -295,7 +323,7 @@ class EmailBotHandler:
                         logger.warning(f"Длина callback_data '{callback_data_str}' превышает 64 байта!")
 
                     button = types.InlineKeyboardButton(
-                        f"⚙️ Настроить: {button_text_subject}",
+                        f"⚙️ {button_text_subject}",
                         callback_data=callback_data_str
                     )
                     keyboard.add(button)
@@ -303,6 +331,12 @@ class EmailBotHandler:
                 explanation_part = EmailTelegramForwarder.escape_markdown_v2(
                     "Нажмите, чтобы изменить настройки конкретного отчета.")
                 response_text += explanation_part
+
+                button_close = types.InlineKeyboardButton(
+                    "❌ Закрыть",
+                    callback_data=CLOSE_REPORTS_PREFIX
+                )
+                keyboard.add(button_close)
 
                 # Отправляем сообщение напрямую, чтобы получить message_id для кэша
                 try:
@@ -325,6 +359,7 @@ class EmailBotHandler:
 
         @self.bot.callback_query_handler(func=lambda call: call.data.startswith(REPORT_CONFIG_PREFIX))
         def handle_report_config_callback(call: types.CallbackQuery):
+            """Обработчик для отображения меню настройки отчета"""
             self._update_user_activity(call.message.chat.id)
             chat_id = str(call.message.chat.id)
             original_message_id = call.message.message_id  # ID сообщения, где была нажата кнопка "Настроить"
@@ -332,6 +367,12 @@ class EmailBotHandler:
             logger.info(f"Получен callback '{call.data}' от {chat_id} для сообщения {original_message_id}")
 
             try:
+                mode_display_map = {
+                    DELIVERY_MODE_TEXT: "Текст",
+                    DELIVERY_MODE_HTML: "HTML",
+                    DELIVERY_MODE_PDF: "PDF",
+                    DELIVERY_MODE_SMART: "Авто (Текст/PDF)"
+                }
                 report_index_str = call.data.replace(REPORT_CONFIG_PREFIX, "")
                 if not report_index_str.isdigit():
                     logger.warning(f"Некорректный индекс в callback_data: '{call.data}'")
@@ -362,24 +403,91 @@ class EmailBotHandler:
                 logger.info(
                     f"Настройка отчета '{subject_to_configure}' (индекс {report_index}), текущий режим: {current_mode}")
 
+                # Получаем статус суммаризации для этого отчета
+                summarization_manager = SummarizationManager()
+                summary_enabled = summarization_manager.get_report_summarization_status(chat_id, subject_to_configure)
+
+                # Получаем настройки пользователя (нужны для флага отправки оригинала)
+                user_settings = self.db_manager.get_user_summarization_settings(chat_id)
+                allow_summarization_control = user_settings.get('allow_summarization', False)
+                subject_settings = self.db_manager.get_subject_summarization_settings(chat_id, subject_to_configure)
+                send_original = subject_settings.get('send_original', True)
+
+
+                # Получаем настройки режима доставки пользователя
+                delivery_settings = self.db_manager.get_user_delivery_settings(chat_id)
+                allow_delivery_mode_selection = delivery_settings.get('allow_delivery_mode_selection', False)
+
+                # Формируем клавиатуру настроек
+                keyboard = types.InlineKeyboardMarkup(row_width=1)
+
+                # Кнопка для режима доставки - добавляем только если разрешен выбор формата
+                if allow_delivery_mode_selection:
+                    button_delivery_text = f"🔄 Режим доставки: {mode_display_map.get(current_mode, current_mode.capitalize())}"
+                    button_delivery = types.InlineKeyboardButton(
+                        button_delivery_text,
+                        callback_data=f"rcfg_delivery_{original_message_id}_{report_index}"
+                    )
+                    keyboard.add(button_delivery)
+
+                # Кнопка включения/выключения суммаризации - добавляем только если разрешено управление
+                if allow_summarization_control:
+                    summary_status = "✅ Вкл" if summary_enabled else "❌ Выкл"
+                    button_summary = types.InlineKeyboardButton(
+                        f"📝 Суммаризация: {summary_status}",
+                        callback_data=f"{SUBJECT_SUMMARY_PREFIX}{original_message_id}_{report_index}"
+                    )
+                    keyboard.add(button_summary)
+
+                    # Кнопка настройки отправки оригинала (только если суммаризация включена)
+                    if summary_enabled:
+                        button_original = types.InlineKeyboardButton(
+                            f"📄 Отправка оригинала: {'✅ Вкл' if send_original else '❌ Выкл'}",
+                            callback_data=f"{SUBJECT_ORIG_PREFIX}{original_message_id}_{report_index}"
+                        )
+                        keyboard.add(button_original)
+
+
+                # Кнопка возврата к списку
+                button_back = types.InlineKeyboardButton(
+                    "⬅️ Назад к списку отчетов",
+                    callback_data=f"back_to_reports"
+                )
+                keyboard.add(button_back)
+
+                # Формируем текст сообщения
                 safe_subject_escaped = EmailTelegramForwarder.escape_markdown_v2(subject_to_configure)
-
-                # original_message_id передается, чтобы кнопки выбора режима знали, к какому кэшу привязываться
-                mode_keyboard = self.get_subject_delivery_mode_keyboard(original_message_id, report_index, current_mode)
-
                 response_parts = [
                     EmailTelegramForwarder.escape_markdown_v2("⚙️ Настройка отчета:"),
                     f"`{safe_subject_escaped}`",
-                    "*" + EmailTelegramForwarder.escape_markdown_v2("Текущий режим:") + "*" +
-                    f" `{EmailTelegramForwarder.escape_markdown_v2(current_mode.capitalize() if current_mode else 'Не задан')}`",
-                    EmailTelegramForwarder.escape_markdown_v2("Выберите новый режим доставки:")
+                    "*" + EmailTelegramForwarder.escape_markdown_v2("Текущие настройки:") + "*",
+                    EmailTelegramForwarder.escape_markdown_v2(
+                        f"• Режим доставки: {mode_display_map.get(current_mode, current_mode.capitalize())}"),
+                    EmailTelegramForwarder.escape_markdown_v2(
+                        f"• Суммаризация: {'Включена' if summary_enabled else 'Отключена'}")
                 ]
+
+                if summary_enabled:
+                    response_parts.append(EmailTelegramForwarder.escape_markdown_v2(
+                        f"• Отправка оригинала: {'Вкл' if send_original else 'Выкл'}")
+                    )
+
+                # Добавляем примечания об ограничениях
+                notes = []
+                if not allow_delivery_mode_selection:
+                    notes.append("⚠️ Выбор формата доставки отключен администратором.")
+                if not allow_summarization_control:
+                    notes.append("⚠️ Управление суммаризацией отключено администратором.")
+
+                if notes:
+                    response_parts.append("\n" + EmailTelegramForwarder.escape_markdown_v2("\n".join(notes)))
+
                 response_text = "\n\n".join(response_parts)
 
                 try:
                     self.bot.edit_message_text(
                         response_text, chat_id, original_message_id,
-                        reply_markup=mode_keyboard, parse_mode='MarkdownV2')
+                        reply_markup=keyboard, parse_mode='MarkdownV2')
                     self.bot.answer_callback_query(call.id)
                 except telebot.apihelper.ApiTelegramException as api_ex:
                     logger.error(
@@ -400,6 +508,33 @@ class EmailBotHandler:
                     self.bot.answer_callback_query(call.id, "Внутренняя ошибка.", show_alert=True)
                 except Exception:
                     pass
+
+        @self.bot.callback_query_handler(func=lambda call: call.data == CLOSE_REPORTS_PREFIX)
+        def handle_close_reports(call: types.CallbackQuery):
+            """Обработчик кнопки закрытия списка отчетов"""
+            self._update_user_activity(call.message.chat.id)
+            chat_id = str(call.message.chat.id)
+            message_id = call.message.message_id
+
+            try:
+                # Удаляем клавиатуру, сохраняя текст сообщения
+                self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text="📋 Меню отчетов закрыто.",
+                    reply_markup=None
+                )
+                self.bot.answer_callback_query(call.id, "Меню закрыто")
+
+                # Удаляем из кэша, так как сообщение больше не активно
+                with self.lock:
+                    if message_id in self.message_report_context_cache:
+                        del self.message_report_context_cache[message_id]
+                        logger.info(f"Кэш для сообщения {message_id} очищен после закрытия.")
+
+            except Exception as e:
+                logger.error(f"Ошибка при закрытии меню отчетов: {e}", exc_info=True)
+                self.bot.answer_callback_query(call.id, "Произошла ошибка при закрытии меню")
 
         @self.bot.callback_query_handler(func=lambda call: call.data.startswith(SUBJECT_MODE_PREFIX))
         def handle_subject_mode_callback(call: types.CallbackQuery):
@@ -472,8 +607,14 @@ class EmailBotHandler:
                         # Удаляем из кэша, так как жизненный цикл этого сообщения завершен
                         with self.lock:
                             if original_message_id in self.message_report_context_cache:
-                                del self.message_report_context_cache[original_message_id]
-                                logger.debug(f"Контекст для msg_id {original_message_id} удален из кэша.")
+                                cached_reports_list = self.message_report_context_cache[original_message_id]
+                                if 0 <= report_index < len(cached_reports_list):
+                                    subject, _ = cached_reports_list[report_index]  # Берем тему, обновляем режим
+                                    cached_reports_list[report_index] = (subject, new_mode)
+                        # Используем тот же подход, что и для суммаризации - меняем call.data и вызываем обработчик
+                        call.data = f"{REPORT_CONFIG_PREFIX}{report_index}"
+                        # Вызываем обработчик конфигурации отчета для возврата в меню настроек
+                        handle_report_config_callback(call)
                     except Exception as edit_ex:
                         logger.warning(
                             f"Не удалось отредактировать сообщение {current_message_id_mode_selection} (смена режима): {edit_ex}. Отправляем новое.")
@@ -490,16 +631,314 @@ class EmailBotHandler:
                 except Exception:
                     pass
 
-        # --- Остальные обработчики без изменений ---
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith("rcfg_delivery_"))
+        def handle_delivery_mode_selection(call: types.CallbackQuery):
+            """Обработчик выбора настройки режима доставки"""
+            self._update_user_activity(call.message.chat.id)
+            chat_id = str(call.message.chat.id)
+            
+            try:
+                # Извлекаем параметры из callback_data
+                _, _, original_message_id, report_index = call.data.split('_')
+                original_message_id = int(original_message_id)
+                report_index = int(report_index)
+
+                # Проверяем, разрешено ли пользователю менять режим доставки
+                delivery_settings = self.db_manager.get_user_delivery_settings(chat_id)
+                if not delivery_settings.get('allow_delivery_mode_selection', True):
+                    self.bot.answer_callback_query(
+                        call.id,
+                        "Выбор формата отправки отключен. Обратитесь к администратору для настройки.",
+                        show_alert=True
+                    )
+                    return
+                
+                with self.lock:
+                    cached_reports_list = self.message_report_context_cache.get(original_message_id)
+                    
+                if not cached_reports_list or report_index >= len(cached_reports_list):
+                    self.bot.answer_callback_query(call.id, "Данные устарели. Запросите /reports снова.", show_alert=True)
+                    return
+                    
+                subject, current_mode = cached_reports_list[report_index]
+                
+                # Показываем клавиатуру выбора режима доставки
+                mode_keyboard = self.get_subject_delivery_mode_keyboard(original_message_id, report_index, current_mode)
+                
+                self.bot.edit_message_text(
+                    f"Выберите режим доставки для отчета:\n\n`{subject}`",
+                    chat_id, call.message.message_id,
+                    reply_markup=mode_keyboard, parse_mode='Markdown'
+                )
+                self.bot.answer_callback_query(call.id)
+                
+            except Exception as e:
+                logger.error(f"Ошибка в handle_delivery_mode_selection: {e}", exc_info=True)
+                self.bot.answer_callback_query(call.id, "Произошла ошибка", show_alert=True)
+
+        @self.bot.callback_query_handler(func=lambda call: call.data == "dummy_action")
+        def handle_dummy_action(call: types.CallbackQuery):
+            """Обработчик для неактивных информационных кнопок"""
+            self.bot.answer_callback_query(
+                call.id,
+                "Эта настройка управляется администратором. Обратитесь к нему для изменения.",
+                show_alert=True
+            )
+
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith(SUBJECT_SUMMARY_PREFIX))
+        def handle_summary_toggle(call: types.CallbackQuery):
+            """Обработчик переключения суммаризации для отчета"""
+            self._update_user_activity(call.message.chat.id)
+            chat_id = str(call.message.chat.id)
+
+            try:
+                # Проверяем, разрешено ли пользователю менять настройки суммаризации
+                user_settings = self.db_manager.get_user_summarization_settings(chat_id)
+                if not user_settings.get('allow_summarization', False):
+                    self.bot.answer_callback_query(
+                        call.id,
+                        "Управление суммаризацией отключено администратором. Обратитесь к администратору для настройки.",
+                        show_alert=True
+                    )
+                    return
+
+                # Извлекаем параметры из callback_data
+                parts = call.data.replace(SUBJECT_SUMMARY_PREFIX, "").split('_')
+                if len(parts) != 2:
+                    self.bot.answer_callback_query(call.id, "Некорректный формат данных", show_alert=True)
+                    return
+
+                original_message_id = int(parts[0])
+                report_index = int(parts[1])
+
+                with self.lock:
+                    cached_reports_list = self.message_report_context_cache.get(original_message_id)
+
+                if not cached_reports_list or report_index >= len(cached_reports_list):
+                    self.bot.answer_callback_query(call.id, "Данные устарели. Запросите /reports снова.",
+                                                   show_alert=True)
+                    return
+
+                subject, _ = cached_reports_list[report_index]
+
+                # Получаем текущий статус и инвертируем его
+                summarization_manager = SummarizationManager()
+                current_status = summarization_manager.get_report_summarization_status(chat_id, subject)
+                new_status = not current_status
+
+                # Сохраняем новый статус
+                if summarization_manager.toggle_report_summarization(chat_id, subject, new_status):
+                    status_text = "включена" if new_status else "отключена"
+                    self.bot.answer_callback_query(call.id, f"Суммаризация {status_text}")
+
+                    # ВАЖНО: Создаем новую копию вызова для обновления UI с обновленными данными
+                    # и очищаем кэш, чтобы гарантировать загрузку актуальных данных
+                    self._clear_cache_for_subject(chat_id, subject)
+
+                    callback_data = f"{REPORT_CONFIG_PREFIX}{report_index}"
+
+                    # Модифицируем существующий объект вызова
+                    call.data = callback_data
+
+                    # Обрабатываем обновленный вызов напрямую
+                    handle_report_config_callback(call)
+                else:
+                    self.bot.answer_callback_query(call.id, "Не удалось изменить настройку", show_alert=True)
+
+            except Exception as e:
+                logger.error(f"Ошибка в handle_summary_toggle: {e}", exc_info=True)
+                self.bot.answer_callback_query(call.id, "Произошла ошибка", show_alert=True)
+
+        @self.bot.callback_query_handler(func=lambda call: call.data.startswith(SUBJECT_ORIG_PREFIX))
+        def handle_original_toggle(call: types.CallbackQuery):
+            """Обработчик переключения отправки оригинала с суммаризацией"""
+            self._update_user_activity(call.message.chat.id)
+            chat_id = str(call.message.chat.id)
+
+            try:
+                # Проверяем, разрешено ли пользователю менять настройки суммаризации
+                user_settings = self.db_manager.get_user_summarization_settings(chat_id)
+                if not user_settings.get('allow_summarization', False):
+                    self.bot.answer_callback_query(
+                        call.id,
+                        "Управление суммаризацией отключено администратором. Обратитесь к администратору для настройки.",
+                        show_alert=True
+                    )
+                    return
+
+                # Извлекаем параметры из callback_data
+                parts = call.data.replace(SUBJECT_ORIG_PREFIX, "").split('_')
+                if len(parts) != 2:
+                    self.bot.answer_callback_query(call.id, "Некорректный формат данных", show_alert=True)
+                    return
+
+                original_message_id = int(parts[0])
+                report_index = int(parts[1])
+
+                with self.lock:
+                    cached_reports_list = self.message_report_context_cache.get(original_message_id)
+
+                if not cached_reports_list or report_index >= len(cached_reports_list):
+                    self.bot.answer_callback_query(call.id, "Данные устарели. Запросите /reports снова.",
+                                                   show_alert=True)
+                    return
+
+                subject, _ = cached_reports_list[report_index]
+
+                # Получаем текущие настройки темы
+                subject_settings = self.db_manager.get_subject_summarization_settings(chat_id, subject)
+                current_send_original = subject_settings.get('send_original', True)
+                new_send_original = not current_send_original
+                prompt_id = subject_settings.get('prompt_id')
+
+                logger.info(
+                    f"Переключение отправки оригинала для {chat_id}, тема '{subject}': {current_send_original} -> {new_send_original}")
+
+                # Сохраняем новые настройки
+                if self.db_manager.update_subject_summarization_settings(chat_id, subject, prompt_id,
+                                                                         new_send_original):
+                    status_text = "включена" if new_send_original else "отключена"
+                    self.bot.answer_callback_query(call.id, f"Отправка оригинала {status_text}")
+
+                    # Явно очищаем кэши всех связанных объектов
+                    self._clear_cache_for_subject(chat_id, subject)
+
+                    # Обновляем значение в кэше (если используется)
+                    with self.lock:
+                        if hasattr(self, 'subject_settings_cache'):
+                            cache_key = f'subject_summarization_settings_{chat_id}_{subject}'
+                            if cache_key in self.subject_settings_cache:
+                                self.subject_settings_cache[cache_key]['send_original'] = new_send_original
+
+                    # Принудительно получаем свежие данные перед обновлением интерфейса
+                    # Это важно, так как мы хотим быть уверены, что новое значение будет использовано
+                    fresh_settings = self.db_manager.get_subject_summarization_settings(chat_id, subject)
+                    actual_send_original = fresh_settings.get('send_original', True)
+                    logger.info(f"Актуальное значение отправки оригинала после обновления: {actual_send_original}")
+
+                    # Модифицируем существующий call.data для вызова обновления интерфейса
+                    call.data = f"{REPORT_CONFIG_PREFIX}{report_index}"
+
+                    # Обрабатываем обновленный вызов напрямую для обновления интерфейса
+                    handle_report_config_callback(call)
+                else:
+                    self.bot.answer_callback_query(call.id, "Не удалось изменить настройку", show_alert=True)
+
+            except Exception as e:
+                logger.error(f"Ошибка в handle_original_toggle: {e}", exc_info=True)
+                self.bot.answer_callback_query(call.id, "Произошла ошибка", show_alert=True)
+
+        @self.bot.callback_query_handler(func=lambda call: call.data == "back_to_reports")
+        def handle_back_to_reports(call: types.CallbackQuery):
+            """Обработчик возврата к списку отчетов"""
+            self._update_user_activity(call.message.chat.id)
+            chat_id = str(call.message.chat.id)
+            original_message_id = call.message.message_id
+
+            logger.info(f"Запрос на возврат к списку отчетов от {chat_id}, message_id: {original_message_id}")
+
+            try:
+                # Отвечаем на запрос сразу, чтобы не было "бесконечной загрузки"
+                self.bot.answer_callback_query(call.id)
+
+                # Получаем список отчетов пользователя
+                subjects_with_modes = self.db_manager.get_user_subjects(chat_id)
+                if not subjects_with_modes:
+                    self.bot.edit_message_text(
+                        "У вас пока нет настроенных отчетов.\nДля настройки отчетов обратитесь к администратору.",
+                        chat_id, original_message_id
+                    )
+                    return
+
+                # Формируем текст и клавиатуру в ТОЧНОСТИ как в handle_show_reports
+                title_part = EmailTelegramForwarder.escape_markdown_v2("📋 Ваши настроенные отчеты:")
+                response_text = title_part + "\n\n"
+
+                mode_display_map = {
+                    DELIVERY_MODE_TEXT: "Текст",
+                    DELIVERY_MODE_HTML: "HTML",
+                    DELIVERY_MODE_PDF: "PDF",
+                    DELIVERY_MODE_SMART: "Авто (Текст/PDF)"
+                }
+                keyboard = types.InlineKeyboardMarkup(row_width=1)
+
+                # Получаем информацию о суммаризации для отчетов
+                summarization_manager = SummarizationManager()
+                subjects_with_summary = {}
+
+                for subject, _ in subjects_with_modes:
+                    subjects_with_summary[subject] = summarization_manager.get_report_summarization_status(chat_id,
+                                                                                                           subject)
+
+                for index, (subject, mode) in enumerate(subjects_with_modes):
+                    safe_subject_content = EmailTelegramForwarder.escape_markdown_v2(subject)
+                    subject_line = f"▪️ *{safe_subject_content}*"
+                    mode_text_display = mode_display_map.get(mode, mode.capitalize())
+                    mode_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Режим:")
+                    mode_line = f"   {mode_prefix_escaped} `{mode_text_display}`"
+
+                    # Добавляем информацию о суммаризации
+                    summary_status = subjects_with_summary.get(subject, False)
+                    summary_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Саммари:")
+                    summary_line = f"   {summary_prefix_escaped} `{'✅' if summary_status else '❌'}`"
+
+                    response_text += f"{subject_line}\n{mode_line}\n{summary_line}\n\n"
+
+                    button_text_subject = f"{subject[:35]}{'...' if len(subject) > 35 else ''}"
+
+                    # callback_data: "rcfgidx_<index>"
+                    callback_data_str = f"{REPORT_CONFIG_PREFIX}{index}"
+                    button = types.InlineKeyboardButton(
+                        f"⚙️ {button_text_subject}",
+                        callback_data=callback_data_str
+                    )
+                    keyboard.add(button)
+
+                explanation_part = EmailTelegramForwarder.escape_markdown_v2(
+                    "Нажмите, чтобы изменить настройки конкретного отчета.")
+                response_text += explanation_part
+
+                button_close = types.InlineKeyboardButton(
+                    "❌ Закрыть",
+                    callback_data=CLOSE_REPORTS_PREFIX
+                )
+                keyboard.add(button_close)
+
+                # Редактируем текущее сообщение вместо отправки нового
+                self.bot.edit_message_text(
+                    response_text, chat_id, original_message_id,
+                    reply_markup=keyboard, parse_mode='MarkdownV2')
+
+                # Обновляем кэш
+                with self.lock:
+                    self.message_report_context_cache[original_message_id] = list(subjects_with_modes)
+
+                logger.info(f"Список отчетов успешно обновлен для {chat_id}")
+
+            except telebot.apihelper.ApiTelegramException as api_ex:
+                logger.error(f"Ошибка API при возврате к списку отчетов: {api_ex}", exc_info=True)
+                try:
+                    self.bot.send_message(
+                        chat_id,
+                        "Не удалось вернуться к списку отчетов. Пожалуйста, используйте команду /reports."
+                    )
+                except Exception:
+                    pass
+
+            except Exception as e:
+                logger.error(f"Ошибка при возврате к списку отчетов: {e}", exc_info=True)
+                try:
+                    self.bot.send_message(
+                        chat_id,
+                        "Произошла ошибка. Пожалуйста, используйте команду /reports."
+                    )
+                except Exception:
+                    pass
+
         @self.bot.message_handler(commands=['enable'])
         def handle_enable(message: types.Message) -> None:
             self._update_user_activity(message.chat.id)
             chat_id = str(message.chat.id)
-            # Проверяем, есть ли пользователь в базе (можно опустить, если update_client_status это обработает)
-            # subjects = self.db_manager.get_user_subjects(chat_id) # Если нужно проверить наличие отчетов ПЕРЕД сменой статуса
-            # if not subjects:
-            #     self._queue_message(chat_id, "У вас нет настроенных отчетов...")
-            #     return
             if self.update_client_status(chat_id, True):
                 self._queue_message(chat_id, "Уведомления включены.")
             else:
@@ -520,12 +959,26 @@ class EmailBotHandler:
             logger.info(f"Пользователь {message.chat.id} запросил помощь (/help)")
             help_message = (
                 "🤖 *Доступные команды:*\n\n"
-                "`/start` \\- Начать работу / Показать меню\n"
-                "`/status` \\- Показать ваш статус\n"
-                "`/reports` \\- Ваши отчеты и настройка доставки\n"
-                "`/enable` \\- Включить уведомления\n"
-                "`/disable` \\- Отключить уведомления\n"
-                "`/help` \\- Показать это сообщение\n\n"
+                "/start \\- Начать работу / Показать меню\n"
+                "/status \\- Показать ваш статус\n"
+                "/reports \\- Ваши отчеты и настройки\n"
+                "/enable \\- Включить уведомления\n"
+                "/disable \\- Отключить уведомления\n"
+                "/help \\- Показать это сообщение\n\n"
+
+                "🪄 **Суммаризация\\: Получайте суть\\, а не стены текста\\!**\n"
+                "Наш искусственный интеллект анализирует входящие отчеты и письма\\, выделяя из них только ключевую информацию\\. Вы получаете краткую и емкую выжимку главного\\, экономя ваше время и силы\\.\n\n"
+                "В настройках каждого отчета вы можете\\:\n"
+                "🔹 Включить или отключить эту функцию\\.\n"
+                "🔹 Выбрать\\, нужен ли вам полный текст документа вместе с его кратким содержанием\\.\n\n"
+
+                "📎 **Формат Доставки\\: Как вам удобно\\!**\n"
+                "Выберите предпочтительный способ получения отчетов\\:\n"
+                "🔸 **Авто \\(Текст/PDF\\)\\:** Бот сам подберет оптимальный формат для каждого сообщения\\.\n"
+                "🔸 **Только Текст\\:** Идеально для быстрого ознакомления и копирования информации\\.\n"
+                "🔸 **Только PDF\\:** Удобно для сохранения\\, печати и официальной документации\\.\n"
+                "🔸 **Только HTML\\:** Для просмотра в браузере с сохранением оригинальной структуры и форматирования\\.\n\n"
+
                 "Используйте кнопки основного меню\\."
             )
             self._queue_message(str(message.chat.id), help_message, parse_mode='MarkdownV2')
@@ -606,7 +1059,6 @@ class EmailBotHandler:
                 types.BotCommand("help", "❓ Помощь")
             ]
 
-            # Используем with_retry для установки команд
             @with_retry(max_attempts=3, delay=5)
             def set_commands_with_retry():
                 self.bot.set_my_commands(commands)
@@ -620,16 +1072,26 @@ class EmailBotHandler:
         logger.info("Запущен поток опроса Telegram API")
         while not self.stop_event.is_set():
             try:
-                self.bot.polling(none_stop=True, interval=1, timeout=30)  # none_stop=True для продолжения при ошибках
+                self.bot.polling(none_stop=True, interval=1, timeout=30)
                 if not self.stop_event.is_set():  # Если polling завершился сам по себе
                     logger.warning("Опрос Telegram API неожиданно завершился, перезапуск...")
                     time.sleep(RECONNECT_DELAY)
             except telebot.apihelper.ApiTelegramException as api_ex:
                 logger.error(f"Ошибка API Telegram в потоке опроса: {api_ex.error_code} - {api_ex.description}")
-                if api_ex.error_code == 401 or api_ex.error_code == 403:  # Unauthorized or Forbidden
+
+                # специальная обработка ошибки 409 (конфликт)
+                if api_ex.error_code == 409:
+                    logger.warning(
+                        "Обнаружен конфликт соединений (ошибка 409). Принудительное освобождение ресурсов...")
+
+                    # Явно говорим системе остановиться и попробовать перезапуститься
+                    self.stop_event.set()  # Выходим из цикла polling
+
+                elif api_ex.error_code == 401 or api_ex.error_code == 403:  # Unauthorized or Forbidden
                     logger.critical("Критическая ошибка авторизации бота! Проверьте токен. Остановка бота.")
                     self.stop_event.set()  # Останавливаем бота
                     break
+
                 logger.info(f"Перезапуск опроса Telegram API через {RECONNECT_DELAY} секунд...")
                 time.sleep(RECONNECT_DELAY)
             except Exception as e:
@@ -662,6 +1124,7 @@ class EmailBotHandler:
             raise
 
     def stop(self) -> None:
+        """Надежная остановка Telegram бота с принудительным закрытием соединений."""
         logger.info("Остановка Telegram бота...")
         if not self.running and self.stop_event.is_set():
             logger.info("Бот уже остановлен или в процессе остановки.")
@@ -674,6 +1137,14 @@ class EmailBotHandler:
             if hasattr(self.bot, 'stop_polling'):  # Убедимся, что метод существует
                 self.bot.stop_polling()  # Это должно прервать self.bot.polling()
             logger.info("Команда остановки опроса отправлена.")
+
+            try:
+                if hasattr(self.bot, 'session') and self.bot.session:
+                    logger.debug("Закрытие сессии бота...")
+                    self.bot.session.close()
+            except Exception as se:
+                logger.error(f"Ошибка при закрытии сессии: {se}")
+
         except Exception as e:
             logger.error(f"Ошибка при вызове bot.stop_polling(): {e}")
 
@@ -712,32 +1183,60 @@ class EmailBotHandler:
                 self.polling_thread is not None and self.polling_thread.is_alive() and
                 self.message_thread is not None and self.message_thread.is_alive())
 
-    def restart(self) -> bool:  # Перезапуск должен быть более надежным
+    def restart(self) -> bool:
+        """Перезапуск Telegram бота с гарантированным освобождением ресурсов."""
         logger.info("Перезапуск Telegram бота...")
+
+        # 1. Останавливаем текущего бота
         self.stop()
-        time.sleep(RECONNECT_DELAY)  # Дать время на освобождение ресурсов
+
+        # 2. Увеличиваем паузу для надежного освобождения ресурсов
+        delay_time = RECONNECT_DELAY * 2  # Увеличенное время ожидания
+        logger.info(f"Ждем {delay_time} секунд для освобождения ресурсов...")
+        time.sleep(delay_time)
+
+        # 3. Вызываем сборщик мусора для очистки неиспользуемых объектов
+        gc.collect()
 
         try:
-            # Сброс состояний, которые могут мешать перезапуску
+            # 4. Сброс всех состояний и кэшей
             with self.lock:
-                # client_data и user_states перезагрузятся через reload_client_data
-                # last_activity сбросится при новом запуске
-                self.message_report_context_cache.clear()  # Очищаем кэш контекста
+                self.message_report_context_cache.clear()
+                # Убедимся, что все остальные важные кэши тоже очищены
+                self.client_data = {}
+                self.client_data_timestamp = 0
+                self.user_states = {}
+                self.user_states_timestamp = 0
+                self.last_activity = {}
 
-            # Пересоздаем основные компоненты
+            # 5. Убедимся, что старого бота больше нет
+            old_bot = self.bot
+            self.bot = None
+            del old_bot  # Явное удаление старого бота
+
+            # 6. Пересоздаем основные компоненты
+            logger.info("Создание нового экземпляра бота...")
             self.bot = self._initialize_bot()
-            self.register_handlers()  # Обработчики должны быть перерегистрированы для нового экземпляра бота
+
+            # 7. Регистрируем обработчики и загружаем данные
+            logger.info("Настройка обработчиков и данных...")
+            self.register_handlers()
             self.reload_client_data()
 
-            self.start()  # Запускаем все потоки заново
+            # 8. Запускаем все заново
+            logger.info("Запуск бота...")
+            self.start()
 
-            # Короткая проверка после перезапуска
-            time.sleep(2)  # Дать время потокам запуститься
+            # 9. Улучшенная проверка успешности запуска
+            check_delay = 3  # Даем больше времени на запуск
+            logger.info(f"Проверка состояния через {check_delay} секунд...")
+            time.sleep(check_delay)
+
             if self.is_alive():
                 logger.info("Telegram бот успешно перезапущен.")
                 return True
             else:
-                logger.error("Не удалось подтвердить, что бот жив после перезапуска.")
+                logger.error("Бот не запустился после перезапуска.")
                 return False
         except Exception as e:
             logger.error(f"Ошибка при перезапуске Telegram бота: {e}", exc_info=True)

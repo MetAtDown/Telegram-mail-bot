@@ -7,7 +7,7 @@
     <div class="page-header">
         <h1>Информация о пользователе</h1>
         <a href="{{ url_for('users') }}" class="btn btn-neutral back-btn">
-            <span>◀</span> Назад к списку
+            <span>◀</span> К списку пользователей
         </a>
     </div>
 
@@ -18,24 +18,7 @@
             <div class="user-status {% if user.is_enabled %}active{% else %}inactive{% endif %}">{{ user.status }}</div>
         </div>
         <div class="panel-body">
-            <div class="user-controls">
-                <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#addSubjectModal">Добавить тему</button>
-                <button type="button" class="btn btn-info" data-toggle="modal" data-target="#bulkAddSubjectModal">Массовое добавление тем</button>
-                <button type="button" class="btn btn-secondary" data-toggle="modal" data-target="#editNotesModal">Редактировать заметки</button>
-
-                <form method="post" action="{{ url_for('toggle_user_status', chat_id=user.chat_id) }}" style="display:inline;">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="btn btn-warning">
-                        {% if user.is_enabled %}Отключить уведомления{% else %}Включить уведомления{% endif %}
-                    </button>
-                </form>
-
-                <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                    <button type="submit" class="btn btn-danger">Удалить пользователя</button>
-                </form>
-            </div>
-
+            {# Блок заметок #}
             <div class="notes-section">
                 <h4>Заметки:</h4>
                 {% if user.notes %}
@@ -43,6 +26,48 @@
                 {% else %}
                     <p class="no-notes">Заметок нет.</p>
                 {% endif %}
+            </div>
+
+            {# Первый ряд кнопок - глобальные переключатели #}
+            <div class="user-controls global-toggles">
+                <form method="post" action="{{ url_for('toggle_user_status', chat_id=user.chat_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn {% if user.is_enabled %}btn-warning{% else %}btn-success{% endif %}">
+                        {% if user.is_enabled %}Отключить уведомления{% else %}Включить уведомления{% endif %}
+                    </button>
+                </form>
+
+                <form method="post" action="{{ url_for('toggle_user_summarization', chat_id=user.chat_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn {% if user.summarization.allow_summarization %}btn-warning{% else %}btn-success{% endif %}">
+                        {% if user.summarization.allow_summarization %}Запретить управление суммаризацией{% else %}Разрешить управление суммаризацией{% endif %}
+                    </button>
+                </form>
+
+                <form method="post" action="{{ url_for('toggle_user_delivery_mode_selection', chat_id=user.chat_id) }}" style="display:inline;">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn {% if user.allow_delivery_mode_selection|default(false) %}btn-warning{% else %}btn-success{% endif %}">
+                        {% if user.allow_delivery_mode_selection|default(false) %}Запретить выбор формата{% else %}Разрешить выбор формата{% endif %}
+                    </button>
+                </form>
+            </div>
+
+            {# Второй ряд кнопок - действия #}
+            <div class="user-controls action-buttons">
+                <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#addSubjectModal">
+                    Добавить тему
+                </button>
+                <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#bulkAddSubjectModal">
+                    Массовое добавление тем
+                </button>
+                <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#editNotesModal">
+                    Редактировать заметки
+                </button>
+
+                <form method="post" action="{{ url_for('delete_user', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.chat_id }}?');">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <button type="submit" class="btn btn-danger">Удалить пользователя</button>
+                </form>
             </div>
         </div>
     </div>
@@ -68,37 +93,59 @@
                         <th>#</th>
                         <th>Тема</th>
                         <th>Формат отправки</th>
+                        <th>Суммаризация</th>
                         <th>Действия</th>
                     </tr>
                 </thead>
                 <tbody>
-                    {% for subject_tuple in user.subjects_with_modes %}
+                    {% for subject, delivery_mode in user.subjects_with_modes %}
                     <tr class="subject-row">
                         <td>{{ loop.index }}</td>
-                        <td class="subject-name">{{ subject_tuple[0] }}</td>
-                        <td>{{ delivery_modes_config.display_map.get(subject_tuple[1], subject_tuple[1]) }}</td>
+                        <td class="subject-name">{{ subject }}</td>
+                        <td>
+                            {% if delivery_modes_config.display_map.get(delivery_mode) %}
+                                {{ delivery_modes_config.display_map.get(delivery_mode) }}
+                            {% else %}
+                                {{ delivery_mode|capitalize }}
+                            {% endif %}
+                        </td>
+                        <td class="subject-summarization-cell">
+                            {% if user.subjects_summarization.get(subject) %}
+                                <span class="status-text active">Включена</span>
+                            {% else %}
+                                <span class="status-text inactive">Выключена</span>
+                            {% endif %}
+                        </td>
                         <td class="actions-cell">
-                            <button type="button" class="btn btn-warning edit-btn"
-                                    data-subject-name="{{ subject_tuple[0] }}"
-                                    data-delivery-mode="{{ subject_tuple[1] }}"
+                            <button type="button"
+                                    class="btn btn-warning edit-btn"
                                     data-toggle="modal"
                                     data-target="#editSubjectModal"
-                                    title="Редактировать тему '{{ subject_tuple[0] }}'">Редактировать</button>
-                            <form method="post" action="{{ url_for('delete_subject', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить тему \'{{ subject_tuple[0] }}\'?');">
+                                    data-subject-name="{{ subject }}"
+                                    data-delivery-mode="{{ delivery_mode }}"
+                                    data-summary-enabled="{{ 'true' if user.subjects_summarization.get(subject, False) else 'false' }}"
+                                    data-send-original="{{ 'true' if user.subject_settings.get(subject, {}).get('send_original', True) else 'false' }}"
+                                    data-prompt-id="{{ user.subject_settings.get(subject, {}).get('prompt_id', '') }}">
+                                Редактировать
+                            </button>
+                            <form method="post" action="{{ url_for('delete_subject', chat_id=user.chat_id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить тему {{ subject }}?');">
                                 <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                                <input type="hidden" name="subject" value="{{ subject_tuple[0] }}">
+                                <input type="hidden" name="subject" value="{{ subject }}">
                                 <button type="submit" class="btn btn-danger delete-btn">Удалить</button>
                             </form>
                         </td>
                     </tr>
                     {% endfor %}
                     <tr class="no-results-row" style="display: none;">
-                         <td colspan="4" class="text-center">По вашему запросу тем не найдено.</td>
+                        <td colspan="5" class="text-center">По вашему запросу тем не найдено.</td>
                     </tr>
                 </tbody>
             </table>
             {% else %}
-                 <p class="text-center">У пользователя нет тем.</p>
+            <div class="alert alert-info">
+                <p>У пользователя нет добавленных тем.</p>
+                <p>Нажмите "Добавить тему" или "Массовое добавление тем", чтобы настроить подписки.</p>
+            </div>
             {% endif %}
         </div>
     </div>
@@ -130,45 +177,80 @@
 
     <!-- Редактирование темы -->
     <div class="modal" id="editSubjectModal" tabindex="-1" role="dialog" aria-labelledby="editSubjectModalLabel" aria-hidden="true" style="display: none;">
-        <div class="modal-dialog" role="document">
+        <div class="modal-dialog modal-lg" role="document">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title" id="editSubjectModalLabel">Редактирование темы</h5>
                     <button type="button" class="close" data-dismiss="modal" aria-label="Close">
-                        <span aria-hidden="true">×</span>
+                        <span aria-hidden="true">&times;</span>
                     </button>
                 </div>
                 <div class="modal-body">
-                    <form id="editSubjectForm" method="post" action="{{ url_for('edit_subject', chat_id=user.chat_id) }}">
+                    <form id="edit-subject-form" method="post" action="{{ url_for('edit_subject', chat_id=user.chat_id) }}">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                        <input type="hidden" name="old_subject" id="edit-form-old-subject" value="">
+                        <input type="hidden" name="original_subject" id="original-subject" value="">
 
                         <div class="form-group">
-                            <label class="form-label">Текущая тема:</label>
-                            <p id="edit-modal-current-subject-display">-</p>
+                            <label for="edit-subject-name">Название темы</label>
+                            <input type="text" class="form-control" id="edit-subject-name" name="subject" required>
                         </div>
                         <div class="form-group">
-                            <label for="edit-form-new-subject" class="form-label">Новое название темы</label>
-                            <input type="text" name="new_subject" id="edit-form-new-subject" class="form-control" required>
-                        </div>
-                        <div class="form-group">
-                            <label for="edit-form-new-delivery-mode" class="form-label">Формат отправки</label>
-                            <select name="new_delivery_mode" id="edit-form-new-delivery-mode" class="form-control" required>
-                                {% if delivery_modes_config and delivery_modes_config.options %}
-                                    {% for mode_key in delivery_modes_config.options %}
-                                    <option value="{{ mode_key }}">
-                                        {{ delivery_modes_config.display_map.get(mode_key, mode_key) }}
-                                    </option>
+                                <label for="edit-delivery-mode">Формат отправки</label>
+                                <select name="delivery_mode" id="edit-delivery-mode" class="form-control">
+                                    {% for mode_option in delivery_modes_config.options %}
+                                        <option value="{{ mode_option }}">
+                                            {{ delivery_modes_config.display_map.get(mode_option, mode_option) }}
+                                        </option>
                                     {% endfor %}
+                                </select>
+                            </div>
+
+                        <div class="form-group summarization-settings">
+                            <h5 class="settings-subtitle">Настройки суммаризации</h5>
+
+                            <!-- Информационное сообщение о глобальной настройке -->
+                            <div class="alert alert-info">
+                                <strong>Примечание:</strong> {% if not user.summarization.allow_summarization %}
+                                    Пользователь не может самостоятельно управлять суммаризацией в Telegram.
                                 {% else %}
-                                    <option value="smart">Авто (Smart)</option>
-                                    <option value="text">Только текст</option>
-                                    <option value="html">HTML</option>
-                                    <option value="pdf">PDF</option>
+                                    Пользователь может самостоятельно управлять суммаризацией в Telegram.
                                 {% endif %}
-                            </select>
+                            </div>
+
+                            <!-- Показываем настройки всегда, вне зависимости от глобальных настроек -->
+                            <div id="subject-summarization-controls">
+                                <div class="form-group">
+                                    <div class="control-label">Включить суммаризацию для этой темы:</div>
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="edit-summary-enabled" name="summary_enabled" class="toggle-switch-checkbox">
+                                        <label for="edit-summary-enabled" class="toggle-switch-label"></label>
+                                    </div>
+                                </div>
+
+                                <div class="form-group subject-summary-option">
+                                    <div class="control-label">Отправлять оригинальный текст:</div>
+                                    <div class="toggle-switch">
+                                        <input type="checkbox" id="edit-send-original" name="send_original" class="toggle-switch-checkbox" checked>
+                                        <label for="edit-send-original" class="toggle-switch-label"></label>
+                                    </div>
+                                </div>
+
+                                <div class="form-group subject-summary-option">
+                                    <label for="edit-prompt-id">Шаблон суммаризации:</label>
+                                    <select name="prompt_id" id="edit-prompt-id" class="form-control">
+                                            {% for prompt in summarization_prompts %}
+                                                <option value="{{ prompt.id }}" {% if prompt.is_default_for_new_users %}selected{% endif %}>
+                                                    {{ prompt.name }} {% if prompt.is_default_for_new_users %}(По умолчанию){% endif %}
+                                                </option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-dismiss="modal">Отмена</button>
+                            <button type="submit" class="btn btn-primary">Сохранить</button>
                         </div>
-                        <button type="submit" class="btn btn-warning">Сохранить изменения</button>
                     </form>
                 </div>
             </div>
@@ -177,15 +259,15 @@
 
     <!-- Массовое добавление тем -->
     <div class="modal" id="bulkAddSubjectModal" tabindex="-1" role="dialog" aria-labelledby="bulkAddSubjectModalLabel" aria-hidden="true" style="display: none;">
-         <div class="modal-dialog" role="document">
-             <div class="modal-content">
-                 <div class="modal-header">
-                     <h5 class="modal-title" id="bulkAddSubjectModalLabel">Массовое добавление тем</h5>
-                     <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+        <div class="modal-dialog modal-lg" role="document">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="bulkAddSubjectModalLabel">Массовое добавление тем</h5>
+                    <button type="button" class="close" data-dismiss="modal" aria-label="Close">
                         <span aria-hidden="true">×</span>
                     </button>
-                 </div>
-                 <div class="modal-body">
+                </div>
+                <div class="modal-body">
                      <form method="post" action="{{ url_for('add_subjects_bulk', chat_id=user.chat_id) }}">
                          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                          <div class="form-group">
@@ -245,66 +327,82 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     if (themesTableBody && editSubjectModalElement) {
-        themesTableBody.addEventListener('click', function(event) {
-            const clickedButton = event.target.closest('.edit-btn');
-            if (!clickedButton) {
-                return; // Клик не по кнопке "Редактировать"
-            }
-            console.log("JS user_details.html: Клик по кнопке .edit-btn обнаружен.");
-            event.preventDefault();
+        // Обработка кнопки редактирования
+        themesTableBody.addEventListener('click', function(e) {
+            if (e.target.classList.contains('edit-btn')) {
+                const button = e.target;
+                const subjectName = button.getAttribute('data-subject-name');
+                const deliveryMode = button.getAttribute('data-delivery-mode');
+                const summaryEnabled = button.getAttribute('data-summary-enabled') === 'true';
+                const sendOriginal = button.getAttribute('data-send-original') === 'true';
 
-            const subjectNameToEdit = clickedButton.getAttribute('data-subject-name');
-            const currentDeliveryMode = clickedButton.getAttribute('data-delivery-mode');
+                console.log(`Редактирование темы: ${subjectName}, режим: ${deliveryMode}, суммаризация: ${summaryEnabled}, отправка оригинала: ${sendOriginal}`);
 
-            console.log(`JS user_details.html: Прочитано с кнопки: Имя='${subjectNameToEdit}', Режим='${currentDeliveryMode}'`);
+                // Заполнение формы редактирования
+                document.getElementById('original-subject').value = subjectName;
+                document.getElementById('edit-subject-name').value = subjectName;
 
-            if (typeof subjectNameToEdit !== 'string' || subjectNameToEdit.trim() === "") {
-                console.error('JS user_details.html: data-subject-name отсутствует или пусто на кнопке!', clickedButton);
-                // Можно добавить уведомление пользователю, если это критично
-                // alert('Ошибка: Не удалось прочитать имя темы. Попробуйте обновить страницу.');
-                return;
-            }
-            const trimmedSubjectName = subjectNameToEdit.trim();
-
-            // --- НЕПОСРЕДСТВЕННОЕ ЗАПОЛНЕНИЕ ПОЛЕЙ МОДАЛЬНОГО ОКНА ---
-            const hiddenOldSubjectField = editSubjectModalElement.querySelector('#edit-form-old-subject');
-            if (hiddenOldSubjectField) {
-                hiddenOldSubjectField.value = trimmedSubjectName;
-                console.log(`JS user_details.html: Установлено значение #edit-form-old-subject: '${hiddenOldSubjectField.value}'`);
-            } else {
-                console.error('JS user_details.html: Скрытое поле #edit-form-old-subject не найдено!');
-                return;
-            }
-
-            const currentSubjectDisplay = editSubjectModalElement.querySelector('#edit-modal-current-subject-display');
-            const newSubjectNameField = editSubjectModalElement.querySelector('#edit-form-new-subject');
-            const newDeliveryModeSelect = editSubjectModalElement.querySelector('#edit-form-new-delivery-mode');
-
-            if (currentSubjectDisplay) {
-                currentSubjectDisplay.textContent = trimmedSubjectName;
-            }
-            if (newSubjectNameField) {
-                newSubjectNameField.value = trimmedSubjectName;
-            }
-            if (newDeliveryModeSelect) {
-                if (currentDeliveryMode !== null && typeof currentDeliveryMode !== 'undefined') {
-                    const optionExists = Array.from(newDeliveryModeSelect.options).some(opt => opt.value === currentDeliveryMode);
-                    if (optionExists) {
-                        newDeliveryModeSelect.value = currentDeliveryMode;
-                    } else {
-                        console.warn(`JS user_details.html: Режим '${currentDeliveryMode}' не найден в селекте, используется default.`);
-                        newDeliveryModeSelect.value = "{{ delivery_modes_config.default | default('smart') }}";
+                // Установка режима доставки
+                const modeSelect = document.getElementById('edit-delivery-mode');
+                for (let i = 0; i < modeSelect.options.length; i++) {
+                    if (modeSelect.options[i].value === deliveryMode) {
+                        modeSelect.selectedIndex = i;
+                        break;
                     }
-                } else {
-                    console.warn(`JS user_details.html: Режим доставки не определен, используется default.`);
-                    newDeliveryModeSelect.value = "{{ delivery_modes_config.default | default('smart') }}";
+                }
+
+                // Установка состояния переключателя суммаризации
+                const summaryEnabledCheckbox = document.getElementById('edit-summary-enabled');
+                if (summaryEnabledCheckbox) {
+                    summaryEnabledCheckbox.checked = summaryEnabled;
+
+                    // Показываем/скрываем дополнительные опции суммаризации в зависимости от состояния
+                    const subjectSummaryOptions = document.querySelectorAll('.subject-summary-option');
+                    subjectSummaryOptions.forEach(option => {
+                        option.style.display = summaryEnabled ? 'block' : 'none';
+                    });
+                }
+
+                // Установка состояния переключателя отправки оригинала
+                const sendOriginalCheckbox = document.getElementById('edit-send-original');
+                if (sendOriginalCheckbox) {
+                    sendOriginalCheckbox.checked = sendOriginal;
+                    console.log(`Установлено состояние отправки оригинала: ${sendOriginal}`);
+                }
+
+                // Установка выбранного промпта
+                let promptId = button.getAttribute('data-prompt-id');
+                // Если promptId пустой и суммаризация включена, используем шаблон по умолчанию
+                if ((!promptId || promptId === '') && summaryEnabled) {
+                    promptId = '{{ default_prompt_id }}';
+                    console.log(`Используется промпт по умолчанию: ${promptId}`);
+                }
+
+                if (promptId) {
+                    const promptSelect = document.getElementById('edit-prompt-id');
+                    for (let i = 0; i < promptSelect.options.length; i++) {
+                        if (promptSelect.options[i].value === promptId) {
+                            promptSelect.selectedIndex = i;
+                            console.log(`Установлен промпт ID: ${promptId}`);
+                            break;
+                        }
+                    }
                 }
             }
-            console.log("JS user_details.html: Поля модального окна #editSubjectModal заполнены.");
-            // main.js должен сам показать модальное окно через data-toggle="modal"
         });
     } else {
-        console.warn("JS user_details.html: Модальное окно или тело таблицы не найдены, обработчик для .edit-btn не будет работать.");
+        console.error("Один из ключевых элементов не найден!");
+    }
+
+    // Переключатель суммаризации для темы
+    const summaryEnabledCheckbox = document.getElementById('edit-summary-enabled');
+    if (summaryEnabledCheckbox) {
+        summaryEnabledCheckbox.addEventListener('change', function() {
+            const subjectSummaryOptions = document.querySelectorAll('.subject-summary-option');
+            subjectSummaryOptions.forEach(option => {
+                option.style.display = this.checked ? 'block' : 'none';
+            });
+        });
     }
 
     // --- Поиск по темам ---
@@ -371,12 +469,11 @@ document.addEventListener('DOMContentLoaded', function() {
     }
 
     // --- Обрезание текста заметок ---
-     document.querySelectorAll('.truncate-text-multiline').forEach(elem => {
+    document.querySelectorAll('.truncate-text-multiline').forEach(elem => {
         elem.addEventListener('click', () => {
             // Проверяем текущее состояние и переключаем
-            // Используем класс 'expanded' для явного управления состоянием, а не только webkitLineClamp
             if (elem.classList.contains('expanded')) {
-                elem.style.webkitLineClamp = ''; // Возвращаем обрезание (браузер определит кол-во строк по CSS)
+                elem.style.webkitLineClamp = ''; // Возвращаем обрезание
                 elem.classList.remove('expanded');
             } else {
                 elem.style.webkitLineClamp = 'none'; // Показываем все строки
@@ -384,6 +481,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     });
+
     console.log("JS user_details.html: Скрипт завершил выполнение (конец DOMContentLoaded).");
 });
 </script>

@@ -41,6 +41,11 @@ class EmailTelegramSystem:
         # Блокировки для доступа к общим ресурсам
         self.status_lock = threading.RLock()
 
+        # Новые атрибуты для контроля перезапусков
+        self._bot_restarting = False  # Флаг текущего перезапуска
+        self._bot_restart_count = 0  # Счетчик перезапусков
+        self._last_bot_restart = datetime.min  # Время последнего перезапуска
+
         # Проверка и создание директории для данных
         self._ensure_data_directory()
 
@@ -316,6 +321,9 @@ class EmailTelegramSystem:
         logger.info("Запуск системы пересылки почты в Telegram...")
 
         try:
+            # Проверяем наличие дубликатов и завершаем их
+            self._check_duplicate_processes()
+
             # Проверка переменных окружения
             if not self.validate_env_variables():
                 return False
@@ -485,36 +493,67 @@ class EmailTelegramSystem:
         return self.start_forwarder()
 
     def _restart_bot(self) -> bool:
-        """
-        Перезапускает Telegram бота.
+        """Перезапускает Telegram бота с улучшенной обработкой ресурсов."""
+        # Атомарно устанавливаем флаг перезапуска, чтобы избежать гонок условий
+        with self.status_lock:
+            if getattr(self, '_bot_restarting', False):
+                logger.warning("Перезапуск бота уже выполняется, пропускаем...")
+                return False
+            self._bot_restarting = True
 
-        Returns:
-            True если перезапуск успешен, иначе False
-        """
-        logger.info("Перезапуск Telegram бота...")
+        try:
+            logger.info("Перезапуск Telegram бота...")
+            import time
+            import gc
 
-        # Останавливаем текущий бот
-        if self.bot_handler and hasattr(self.bot_handler, 'stop'):
-            try:
-                self.bot_handler.stop()
-            except Exception as e:
-                logger.error(f"Ошибка при остановке Telegram бота: {e}")
+            # Остановка текущего бота со всеми ресурсами
+            if self.bot_handler and hasattr(self.bot_handler, 'stop'):
+                try:
+                    logger.info("Остановка текущего экземпляра бота...")
+                    self.bot_handler.stop()
+                except Exception as e:
+                    logger.error(f"Ошибка при остановке Telegram бота: {e}")
 
-        # Ждем завершения потока
-        if self.bot_thread and self.bot_thread.is_alive():
-            self.bot_thread.join(timeout=5)
-            if self.bot_thread.is_alive():
-                logger.warning("Поток Telegram бота не завершился за отведенное время")
+            # Ожидание завершения всех связанных потоков
+            if self.bot_thread and self.bot_thread.is_alive():
+                logger.info("Ожидание завершения потока бота...")
+                self.bot_thread.join(timeout=20)  # Увеличенный таймаут для гарантии завершения
+                if self.bot_thread.is_alive():
+                    logger.warning("Поток Telegram бота не завершился за отведенное время")
 
-        # Сброс объектов
-        self.bot_handler = None
-        self.bot_thread = None
+            # Сброс объектов
+            old_bot = self.bot_handler
+            self.bot_handler = None
+            self.bot_thread = None
+            del old_bot  # Явное удаление старой ссылки
 
-        # Вызываем сборщик мусора
-        gc.collect()
+            # Вызов сборщика мусора
+            logger.debug("Вызов сборщика мусора для освобождения ресурсов...")
+            gc.collect()
 
-        # Запускаем новый бот
-        return self.start_telegram_bot()
+            # Пауза перед созданием нового экземпляра
+            delay = 10  # Увеличенная пауза
+            logger.info(f"Ожидание {delay} секунд перед созданием нового экземпляра...")
+            time.sleep(delay)
+
+            # Запуск нового бота
+            logger.info("Запуск нового экземпляра Telegram бота...")
+            success = self.start_telegram_bot()
+
+            if success:
+                logger.info("Бот успешно перезапущен")
+            else:
+                logger.error("Не удалось перезапустить бота")
+
+            return success
+        except Exception as e:
+            logger.error(f"Ошибка при перезапуске бота: {e}", exc_info=True)
+            return False
+        finally:
+            # Снимаем флаг перезапуска
+            with self.status_lock:
+                self._bot_restarting = False
+                logger.debug("Флаг перезапуска снят")
 
     def _command_worker(self) -> None:
         """Обработчик команд для межпоточного взаимодействия."""
@@ -573,9 +612,51 @@ class EmailTelegramSystem:
 
         logger.info("Мониторинг системы завершен")
 
+    def _check_duplicate_processes(self) -> None:
+        """Проверяет наличие дублирующихся процессов бота и завершает их."""
+        try:
+            import psutil
+
+            current_process = psutil.Process()
+            current_pid = current_process.pid
+            bot_processes = []
+
+            # Ищем все процессы Python, которые могут быть нашим ботом
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    # Ищем процессы по ключевым словам в командной строке
+                    if 'python' in proc.info['name'].lower() and proc.info['cmdline']:
+                        cmdline = ' '.join(proc.info['cmdline'])
+                        if 'system.py' in cmdline and proc.info['pid'] != current_pid:
+                            bot_processes.append(proc)
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+
+            # Если найдены дублирующиеся процессы, логируем и пытаемся их завершить
+            if bot_processes:
+                logger.warning(f"Обнаружено {len(bot_processes)} дублирующихся процессов бота.")
+                for proc in bot_processes:
+                    try:
+                        logger.info(f"Завершение дублирующегося процесса бота PID={proc.info['pid']}")
+                        proc.terminate()  # Более мягкое завершение
+                    except Exception as e:
+                        logger.error(f"Не удалось завершить процесс {proc.info['pid']}: {e}")
+
+        except ImportError:
+            logger.debug("Модуль psutil не установлен. Проверка дублирующихся процессов отключена.")
+        except Exception as e:
+            logger.error(f"Ошибка при проверке дублирующихся процессов: {e}")
+
     def _check_threads_health(self) -> None:
         """Проверяет состояние потоков и перезапускает их при необходимости."""
         current_time = datetime.now()
+
+        # Проверяем время последнего перезапуска и ограничиваем частоту
+        last_restart = getattr(self, '_last_bot_restart', datetime.min)
+        min_restart_interval = timedelta(minutes=10)  # Минимум 10 минут между перезапусками
+
+        if (current_time - last_restart) < min_restart_interval:
+            return  # Пропускаем проверку, если недавно был перезапуск
 
         # Проверяем поток форвардера
         if self.forwarder_thread is None or not self.forwarder_thread.is_alive():
@@ -601,6 +682,9 @@ class EmailTelegramSystem:
             logger.warning("Поток Telegram бота остановлен. Перезапуск...")
             success = self._restart_bot()
 
+            # Запоминаем время этого перезапуска
+            self._last_bot_restart = current_time
+
             with self.status_lock:
                 if success:
                     self.threads_health["telegram_bot"] = {
@@ -618,28 +702,51 @@ class EmailTelegramSystem:
     def _check_resource_usage(self) -> None:
         """Проверяет потребление ресурсов и принимает меры при необходимости."""
         try:
-            process = psutil.Process(os.getpid())
+
+            process = psutil.Process()
+
+            # Отслеживаем количество перезапусков бота
+            restart_count = getattr(self, '_bot_restart_count', 0)
+            last_restart = getattr(self, '_last_bot_restart', datetime.min)
+            now = datetime.now()
+
+            # Ограничиваем частоту перезапусков (не чаще 1 раза в 10 минут)
+            if (now - last_restart).total_seconds() < 600:  # 600 секунд = 10 минут
+                return
 
             # Проверяем потребление памяти
             memory_percent = process.memory_percent()
-            if memory_percent > 80:  # Если используется более 80% доступной памяти
+            if memory_percent > 75:  # Если используется более 75% доступной памяти
                 logger.warning(f"Высокое потребление памяти: {memory_percent:.1f}%. Выполняем сборку мусора.")
                 gc.collect()
 
-                # Если после сборки мусора все еще высокое потребление
-                if process.memory_percent() > 75:
+                # Проверяем улучшилась ли ситуация
+                new_memory_percent = process.memory_percent()
+                if new_memory_percent > 70:  # Если все еще высокое потребление
                     logger.warning(
-                        "Потребление памяти остается высоким после сборки мусора. Рассмотрите увеличение доступной памяти.")
+                        f"Потребление памяти остается высоким: {new_memory_percent:.1f}%. Планируем перезапуск бота.")
+                    self._bot_restart_count = restart_count + 1
+                    self._last_bot_restart = now
+                    self.command_queue.put(("restart_bot", {}))
 
             # Проверяем загрузку CPU
-            cpu_percent = process.cpu_percent(interval=0.1)
-            if cpu_percent > 90:  # Если загрузка CPU более 90%
-                logger.warning(f"Высокая загрузка CPU: {cpu_percent:.1f}%.")
+            cpu_percent = process.cpu_percent(interval=0.5)
+            if cpu_percent > 80:  # Если загрузка CPU более 80%
+                logger.warning(f"Высокая загрузка CPU: {cpu_percent:.1f}%. Проверяем потоки.")
 
-                # Проверяем количество потоков
+                # Логируем информацию о потоках
                 thread_count = threading.active_count()
                 logger.info(f"Активных потоков: {thread_count}")
 
+                # Если загрузка критически высокая и прошло достаточно времени с последнего перезапуска
+                if cpu_percent > 90 and (now - last_restart).total_seconds() > 1200:  # 20 минут
+                    logger.warning("Критически высокая загрузка CPU. Планируем перезапуск бота.")
+                    self._bot_restart_count = restart_count + 1
+                    self._last_bot_restart = now
+                    self.command_queue.put(("restart_bot", {}))
+
+        except ImportError:
+            logger.warning("Модуль psutil не установлен. Мониторинг ресурсов отключен.")
         except Exception as e:
             logger.error(f"Ошибка при проверке потребления ресурсов: {e}")
 

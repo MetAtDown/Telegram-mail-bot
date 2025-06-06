@@ -13,6 +13,20 @@
 <div class="panel">
     <div class="panel-header">История действий пользователей</div>
     <div class="panel-body">
+        <!-- Форма для серверного поиска -->
+        <div class="search-container mb-3">
+            <form method="get" action="{{ url_for('activity_log') }}" id="server-search-form">
+                <div class="search-wrapper">
+                    <input type="text" name="search" class="search-input" placeholder="Поиск по журналу активности..."
+                           value="{{ search_query or '' }}">
+                    <button type="submit" class="btn search-btn">Поиск</button>
+                    {% if search_query %}
+                    <a href="{{ url_for('activity_log') }}" class="btn clear-btn">Очистить</a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+
         <table class="users-table">
             <thead>
                 <tr>
@@ -28,7 +42,7 @@
                 {% for log in logs %}
                 <tr>
                     <td>{{ log.id }}</td>
-                    <td>{{ log.username }}</td>
+                    <td>{{ log.username or 'Удаленный пользователь' }}</td>
                     <td>
                         {% set action = log.action %}
                         {% if 'login' in action %}
@@ -53,27 +67,47 @@
                 </tr>
                 {% else %}
                 <tr>
-                    <td colspan="6" class="text-center">Записи не найдены</td>
+                    <td colspan="6" class="text-center">
+                        {% if search_query %}
+                        По вашему запросу не найдено записей
+                        {% else %}
+                        Записи не найдены
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
-        
+
+        <!-- Общее количество записей -->
+        <div class="users-count">Всего: {{ total_logs }} записей</div>
+
         {% if total_pages > 1 %}
         <div class="pagination">
+            <!-- Ссылка на предыдущую страницу -->
             {% if page > 1 %}
-            <a href="{{ url_for('activity_log', page=page-1) }}" class="pagination-item"><<</a>
+            <a href="{{ url_for('activity_log', page=page-1, search=search_query) }}" class="pagination-item">«</a>
+            {% else %}
+            <span class="pagination-item disabled">«</span>
             {% endif %}
-            
+
+            <!-- Номера страниц с логикой отображения -->
             {% for i in range(1, total_pages + 1) %}
-            <a href="{{ url_for('activity_log', page=i) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+                {% if i == 1 or i == total_pages or i >= page - 2 and i <= page + 2 %}
+                    {% if loop.previtem is defined and i > loop.previtem + 1 %}
+                        <span class="pagination-item ellipsis">...</span>
+                    {% endif %}
+                    <a href="{{ url_for('activity_log', page=i, search=search_query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+                {% endif %}
             {% endfor %}
-            
+
+            <!-- Ссылка на следующую страницу -->
             {% if page < total_pages %}
-            <a href="{{ url_for('activity_log', page=page+1) }}" class="pagination-item">>></a>
+            <a href="{{ url_for('activity_log', page=page+1, search=search_query) }}" class="pagination-item">»</a>
+            {% else %}
+            <span class="pagination-item disabled">»</span>
             {% endif %}
         </div>
-        <div class="pagination-info">Страница {{ page }} из {{ total_pages }}</div>
         {% endif %}
     </div>
 </div>

@@ -1,0 +1,55 @@
+{% extends 'base.html' %}
+
+{% block title %}Добавить шаблон суммаризации | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Создание нового шаблона суммаризации</h1>
+    <a href="{{ url_for('summarization_prompts') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> К списку шаблонов
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Новый шаблон</div>
+    <div class="panel-body">
+        <form method="post" action="{{ url_for('add_summarization_prompt') }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+
+            <div class="form-group">
+                <label for="name" class="form-label">Название шаблона</label>
+                <input type="text" name="name" id="name" class="form-control" required
+                       placeholder="Например: Краткое изложение основных пунктов">
+                <div class="hint-text">Название должно кратко описывать назначение шаблона</div>
+            </div>
+
+            <div class="form-group">
+                <label for="prompt_text" class="form-label">Текст запроса для ИИ</label>
+                <textarea name="prompt_text" id="prompt_text" class="form-control" rows="8" required
+                          placeholder="Например: Создай краткое изложение этого письма, перечислив основные факты, выводы и задачи. Выдели важные даты и цифры."></textarea>
+                <div class="hint-text">
+                    Текст запроса будет передан модели ИИ вместе с текстом письма.
+                    Будьте конкретны в своих инструкциях.
+                </div>
+            </div>
+
+            <div class="form-group">
+                <div class="control-label">Установить как шаблон по умолчанию:</div>
+                <div class="toggle-switch">
+                    <input type="checkbox" id="add-is-default" name="is_default" class="toggle-switch-checkbox" value="true">
+                    <label for="add-is-default" class="toggle-switch-label"></label>
+                </div>
+                <div class="hint-text">
+                    Если включено, этот шаблон будет использоваться для новых пользователей и при создании
+                    суммаризаций без указанного шаблона. Текущий шаблон по умолчанию будет переведен в обычный статус.
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button type="submit" class="btn btn-primary">Создать шаблон</button>
+                <a href="{{ url_for('summarization_prompts') }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

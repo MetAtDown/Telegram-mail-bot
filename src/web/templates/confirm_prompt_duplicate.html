@@ -1,0 +1,68 @@
+{% extends 'base.html' %}
+
+{% block title %}Подтверждение действия | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Подтверждение действия</h1>
+</div>
+
+<div class="panel">
+    <div class="panel-header">Дублирование шаблона</div>
+    <div class="panel-body">
+        <div class="alert alert-warning">
+            <p>Текст промпта, который вы хотите {{ 'сохранить' if edit_mode else 'создать' }}, совпадает с существующим шаблоном.</p>
+        </div>
+
+        <div class="existing-prompts">
+            <h3>Существующие шаблоны:</h3>
+            {% for prompt in similar_prompts %}
+            <div class="alert alert-info">
+                <strong>{{ prompt.name }}</strong> {% if prompt.is_default %}(По умолчанию){% endif %}
+                <hr>
+                <div class="truncate-text-multiline prompt-text" title="{{ prompt.prompt_text }}">{{ prompt.prompt_text }}</div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="alert alert-info">
+            <h3>Ваш шаблон:</h3>
+            <strong>{{ name }}</strong>
+            <hr>
+            <div class="truncate-text-multiline prompt-text" title="{{ prompt_text }}">{{ prompt_text }}</div>
+        </div>
+
+        <form method="post" action="{% if edit_mode %}{{ url_for('edit_summarization_prompt', prompt_id=prompt_id) }}{% else %}{{ url_for('add_summarization_prompt') }}{% endif %}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="name" value="{{ name }}">
+            <input type="hidden" name="prompt_text" value="{{ prompt_text }}">
+            <input type="hidden" name="is_default" value="{{ 'true' if is_default else 'false' }}">
+            <input type="hidden" name="confirm_duplicate" value="true">
+
+            <div class="buttons-container">
+                <button type="submit" class="btn btn-warning">Всё равно создать</button>
+                <a href="{{ url_for('summarization_prompts') }}" class="btn btn-neutral">Отмена</a>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Обработка многострочного усечения для отображения текста шаблонов
+    document.querySelectorAll('.truncate-text-multiline').forEach(elem => {
+        elem.addEventListener('click', () => {
+            if (elem.classList.contains('expanded')) {
+                elem.style.webkitLineClamp = '';
+                elem.classList.remove('expanded');
+            } else {
+                elem.style.webkitLineClamp = 'none';
+                elem.classList.add('expanded');
+            }
+        });
+    });
+});
+</script>
+{% endblock %}

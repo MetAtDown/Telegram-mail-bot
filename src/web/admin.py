@@ -19,7 +19,8 @@ import concurrent.futures
 import signal
 import sys
 import psutil
-from src.db.manager import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF
+from src.db.manager import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, \
+    DELIVERY_MODE_SMART, DELIVERY_MODE_PDF
 from src.config import settings
 from src.utils.logger import get_logger
 from src.core.bot_status import get_bot_status, start_bot, stop_bot
@@ -29,7 +30,7 @@ from src.db.manager import DatabaseManager
 from src.utils.cache_manager import invalidate_caches, is_cache_valid
 
 from src.web.auth import init_admin_users, hash_password, verify_password, log_activity
-
+from markupsafe import Markup
 # Настройка логирования
 logger = get_logger("web_admin")
 
@@ -74,6 +75,12 @@ app = Flask(__name__,
             template_folder=str(templates_dir),
             static_folder=str(static_dir))
 
+@app.template_filter('nl2br')
+def nl2br_filter(s):
+    """Заменяет символы перевода строки на HTML теги <br />"""
+    if s is None:
+        return ''
+    return Markup(s.replace('\n', '<br />'))
 # Для правильной работы за прокси-сервером
 app.wsgi_app = ProxyFix(app.wsgi_app)
 
@@ -358,7 +365,7 @@ def check_duplicate_subjects(subjects_to_check: List[str], exclude_chat_id: Opti
         return []
 
     duplicate_subjects_found = set()
-    subjects_to_check_set = set(subjects_to_check) # Для быстрой проверки
+    subjects_to_check_set = set(subjects_to_check)  # Для быстрой проверки
 
     try:
         # Получаем данные из кэша или БД (новая структура)
@@ -379,7 +386,7 @@ def check_duplicate_subjects(subjects_to_check: List[str], exclude_chat_id: Opti
                     if subscriber_chat_id != exclude_chat_id:
                         # Нашли дубликат у другого пользователя
                         duplicate_subjects_found.add(subject)
-                        break # Достаточно одного другого подписчика для этой темы
+                        break  # Достаточно одного другого подписчика для этой темы
 
     except Exception as e:
         logger.error(f"Ошибка при проверке дубликатов тем: {e}", exc_info=True)
@@ -403,7 +410,7 @@ def signal_handler(sig, frame):
         db_manager.shutdown()
 
     # Принудительное завершение для предотвращения зависания
-    os._exit(0)
+    os._exit(0) # type: ignore
 
 
 # Регистрируем обработчики сигналов
@@ -587,7 +594,7 @@ def index():
         # Получаем данные из кэша или обновляем
         def get_stats():
             # Получение информации о пользователях
-            user_states = db_manager.get_all_users() # Этот метод остался
+            user_states = db_manager.get_all_users()  # Этот метод остался
 
             # --- ИЗМЕНЕНИЕ: Подсчет тем напрямую ---
             total_subjects = 0
@@ -596,12 +603,12 @@ def index():
                 # Используем execute_optimized_query для получения результата
                 result = db_manager.execute_optimized_query(
                     "SELECT COUNT(*) as count FROM subjects",
-                    fetch_all=False # Нам нужна только одна строка с результатом
+                    fetch_all=False  # Нам нужна только одна строка с результатом
                 )
                 if result and 'count' in result[0]:
                     total_subjects = result[0]['count']
                 else:
-                     logger.warning("Не удалось получить количество тем из БД для статистики.")
+                    logger.warning("Не удалось получить количество тем из БД для статистики.")
             except Exception as count_err:
                 logger.error(f"Ошибка при подсчете тем для статистики: {count_err}")
             # --- КОНЕЦ ИЗМЕНЕНИЯ ---
@@ -613,7 +620,7 @@ def index():
             return {
                 'total_users': total_users,
                 'active_users': active_users,
-                'total_subjects': total_subjects # Используем посчитанное значение
+                'total_subjects': total_subjects  # Используем посчитанное значение
             }
 
         stats = get_cached_data('stats', get_stats, ttl=60)  # Кэшируем на минуту
@@ -640,11 +647,11 @@ def index():
 @app.route('/users')
 @login_required
 def users():
-    """Страница со списком пользователей."""
+    """Страница со списком пользователей с серверным поиском."""
     try:
-        # Получаем параметры пагинации и ПОИСК БОЛЬШЕ НЕ ИСПОЛЬЗУЕТСЯ НА СЕРВЕРЕ
+        # Получаем параметры пагинации и поиска
         page = request.args.get('page', 1, type=int)
-        # search_query = request.args.get('search', '').strip() # Убираем серверный поиск
+        search_query = request.args.get('search', '').strip()  # Активируем серверный поиск
         per_page = ITEMS_PER_PAGE
 
         # Получаем данные из кэша или обновляем (включая заметки)
@@ -674,39 +681,60 @@ def users():
                         'chat_id': u['chat_id'],
                         'status': 'Активен' if u['status'] == 'Enable' else 'Отключен',
                         'is_enabled': u['status'] == 'Enable',
-                        'subject_count': u.get('subject_count', 0), # Используем результат COUNT
+                        'subject_count': u.get('subject_count', 0),  # Используем результат COUNT
                         'notes': u.get('notes', '')
                     } for u in all_users_details
                 ]
                 # Сортировка уже сделана в SQL запросе ORDER BY u.status DESC
 
             except Exception as db_err:
-                 logger.error(f"Ошибка при получении данных пользователей с темами: {db_err}", exc_info=True)
+                logger.error(f"Ошибка при получении данных пользователей с темами: {db_err}", exc_info=True)
             return users_data
 
         # Получаем ВСЕ данные пользователей с заметками
-        all_users_data = get_cached_data('users_data_with_notes', get_users_data, ttl=60)
+        cache_key = 'users_data_with_notes'  # Базовый ключ кэша
+        all_users_data = get_cached_data(cache_key, get_users_data, ttl=60)
 
-        # Пагинация применяется ко всем данным
-        total_users = len(all_users_data) # Общее количество пользователей
+        # Применяем фильтрацию по поисковому запросу
+        if search_query:
+            # Преобразуем поисковый запрос в нижний регистр для нечувствительного сравнения
+            search_query_lower = search_query.lower()
+            filtered_users_data = []
+
+            # Фильтруем пользователей по поисковому запросу
+            for user in all_users_data:
+                if (search_query_lower in user['chat_id'].lower() or
+                        search_query_lower in user['status'].lower() or
+                        search_query_lower in str(user['subject_count']).lower() or
+                        search_query_lower in user.get('notes', '').lower()):
+                    filtered_users_data.append(user)
+
+            all_users_data = filtered_users_data
+            logger.debug(
+                f"После применения фильтра поиска '{search_query}' осталось {len(all_users_data)} пользователей")
+
+        # Пагинация применяется к отфильтрованным данным
+        total_users = len(all_users_data)  # Количество найденных пользователей
         total_pages = math.ceil(total_users / per_page) if total_users > 0 else 1
+
+        # Исправляем страницу, если она вышла за пределы после фильтрации
+        if page > total_pages:
+            page = 1
 
         start_idx = (page - 1) * per_page
         end_idx = start_idx + per_page
-        paginated_users = all_users_data[start_idx:end_idx] # Пагинируем полный список
+        paginated_users = all_users_data[start_idx:end_idx]  # Пагинируем отфильтрованный список
 
         # Получаем роль пользователя для отображения доступных действий
         user_role = session.get('user_role', 'viewer')
 
-        # search_query передаем пустым, т.к. поиск клиентский
-        search_query = request.args.get('search', '') # Передаем для JS на случай, если он там нужен
-
+        # Передаём поисковый запрос в шаблон для отображения в форме поиска и ссылках пагинации
         return render_template('users.html',
                                users=paginated_users,
                                page=page,
                                total_pages=total_pages,
-                               total_users=total_users, # Передаем ОБЩЕЕ кол-во
-                               search_query=search_query, # Передаем для JS, если он его использует
+                               total_users=total_users,  # Передаем количество найденных пользователей
+                               search_query=search_query,  # Передаем поисковый запрос для формы и ссылок
                                user_role=user_role)
     except Exception as e:
         logger.error(f"Ошибка при загрузке списка пользователей: {e}", exc_info=True)
@@ -719,7 +747,7 @@ def users():
 def user_details(chat_id: str):
     """
     Страница с деталями пользователя и его темами.
-    (Исправлена для передачи полного списка тем с режимами в шаблон)
+    (Дополнена получением настроек выбора режима доставки и настроек тем)
 
     Args:
         chat_id: ID чата пользователя
@@ -731,18 +759,40 @@ def user_details(chat_id: str):
             subjects_with_modes_tuples = db_manager.get_user_subjects(chat_id)
             notes = db_manager.get_user_notes(chat_id)
 
+            # Получаем настройки суммаризации для пользователя
+            summarization_settings = db_manager.get_user_summarization_settings(chat_id)
+
+            # Получаем настройки режима доставки
+            delivery_settings = db_manager.get_user_delivery_settings(chat_id)
+
+            # Получаем статус суммаризации и настройки для каждой темы
+            subjects_summarization = {}
+            subject_settings = {}  # Новый словарь для настроек всех тем
+
+            for subject, _ in subjects_with_modes_tuples:
+                subjects_summarization[subject] = db_manager.get_subject_summarization_status(chat_id, subject)
+                # Получаем настройки для каждой темы (включая send_original)
+                subject_settings[subject] = db_manager.get_subject_summarization_settings(chat_id, subject)
+
             return {
                 'is_enabled': is_enabled,
-                'subjects_with_modes': subjects_with_modes_tuples, # <--- Передаем полный список кортежей
-                'notes': notes
+                'subjects_with_modes': subjects_with_modes_tuples,
+                'notes': notes,
+                'summarization': summarization_settings,
+                'subjects_summarization': subjects_summarization,
+                'delivery_settings': delivery_settings,
+                'subject_settings': subject_settings  # Добавляем настройки тем
             }
 
         user_data_cache = get_cached_data(f'user_data_{chat_id}', get_user_data, ttl=60)
 
         is_enabled = user_data_cache['is_enabled']
-        # <<< ИСПОЛЬЗУЕМ ПОЛНЫЙ СПИСОК ТЕМ С РЕЖИМАМИ >>>
         subjects_with_modes = user_data_cache['subjects_with_modes']
         notes = user_data_cache['notes']
+        summarization_settings = user_data_cache.get('summarization', {})
+        subjects_summarization = user_data_cache.get('subjects_summarization', {})
+        delivery_settings = user_data_cache.get('delivery_settings', {'allow_delivery_mode_selection': True})
+        subject_settings = user_data_cache.get('subject_settings', {})  # Получаем настройки тем из кэша
 
         # Поиск по темам (применяется к списку кортежей, ищем по имени темы)
         search_query = request.args.get('search', '')
@@ -758,15 +808,19 @@ def user_details(chat_id: str):
             'chat_id': chat_id,
             'status': 'Активен' if is_enabled else 'Отключен',
             'is_enabled': is_enabled,
-            'subjects_with_modes': filtered_subjects_with_modes, # <--- Передаем (отфильтрованный) список кортежей
-            'notes': notes
+            'subjects_with_modes': filtered_subjects_with_modes,
+            'notes': notes,
+            'summarization': summarization_settings,
+            'subjects_summarization': subjects_summarization,
+            'allow_delivery_mode_selection': delivery_settings.get('allow_delivery_mode_selection', True),
+            'subject_settings': subject_settings  # Добавляем настройки тем в данные пользователя
         }
 
         user_role = session.get('user_role', 'viewer')
 
         # Конфигурация для выбора режима доставки в модальном окне
         delivery_modes_config = {
-            "options": sorted(list(ALLOWED_DELIVERY_MODES)), # Гарантируем порядок
+            "options": sorted(list(ALLOWED_DELIVERY_MODES)),
             "default": DEFAULT_DELIVERY_MODE,
             "display_map": {
                 DELIVERY_MODE_TEXT: 'Только текст',
@@ -776,15 +830,26 @@ def user_details(chat_id: str):
             }
         }
 
+        # Получаем все доступные шаблоны промптов для выбора
+        all_prompts = db_manager.get_all_summarization_prompts()
+
+        # Находим ID шаблона по умолчанию
+        default_prompt_id = None
+        for prompt in all_prompts:
+            if prompt.get('is_default_for_new_users', False):
+                default_prompt_id = str(prompt['id'])
+                break
+
         return render_template('user_details.html',
                                user=user_data,
                                user_role=user_role,
-                               delivery_modes_config=delivery_modes_config) # <--- Передаем конфигурацию
+                               delivery_modes_config=delivery_modes_config,
+                               summarization_prompts=all_prompts,
+                               default_prompt_id=default_prompt_id)
     except Exception as e:
         logger.error(f"Ошибка при загрузке деталей пользователя {chat_id}: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('users'))
-
 
 
 @app.route('/user/<chat_id>/toggle-status', methods=['POST'])
@@ -825,6 +890,71 @@ def toggle_user_status(chat_id: str):
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('user_details', chat_id=chat_id))
 
+
+@app.route('/user/<chat_id>/toggle-delivery-mode-selection', methods=['POST'])
+@login_required
+@operator_required
+def toggle_user_delivery_mode_selection(chat_id):
+    """Включение/отключение возможности выбора режима доставки для пользователя."""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.form.get('from_modal') == 'true'
+
+    try:
+        # Получаем текущие настройки пользователя
+        delivery_settings = db_manager.get_user_delivery_settings(chat_id)
+
+        # Проверяем, был ли передан явный статус
+        if 'enable' in request.form:
+            new_status = request.form.get('enable') == 'true'
+        else:
+            # Переключаем статус
+            current_status = delivery_settings.get('allow_delivery_mode_selection', True)
+            new_status = not current_status
+
+        # Обновляем настройки
+        if db_manager.update_user_delivery_settings(chat_id, new_status):
+            status_text = "разрешен" if new_status else "запрещен"
+
+            if is_ajax:
+                # Если AJAX запрос, возвращаем JSON
+                return jsonify({
+                    'success': True,
+                    'status': new_status,
+                    'message': f"Выбор формата доставки для пользователя {chat_id} {status_text}"
+                })
+            else:
+                # Иначе используем стандартный flash и редирект
+                flash(f"Выбор формата доставки для пользователя {chat_id} {status_text}", "success")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "toggle_delivery_mode_selection",
+                             request.remote_addr, f"chat_id={chat_id}, status={status_text}")
+
+            # Инвалидация кэша
+            invalidate_all_caches()
+        else:
+            if is_ajax:
+                return jsonify({
+                    'success': False,
+                    'error': f"Не удалось изменить статус выбора формата для пользователя {chat_id}"
+                })
+            else:
+                flash(f"Не удалось изменить статус выбора формата для пользователя {chat_id}", "danger")
+
+        if not is_ajax:
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+    except Exception as e:
+        logger.error(f"Ошибка при изменении статуса выбора формата для пользователя {chat_id}: {e}", exc_info=True)
+
+        if is_ajax:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            })
+        else:
+            flash(f"Произошла ошибка: {e}", "danger")
+            return redirect(url_for('user_details', chat_id=chat_id))
 
 @app.route('/user/<chat_id>/add-subject', methods=['POST'])
 @login_required
@@ -884,148 +1014,77 @@ def add_subject(chat_id: str):
 @limiter.limit("100 per minute")
 def edit_subject(chat_id: str):
     """
-    Редактирование темы пользователя (имя и/или формат отправки).
+    Редактирование темы пользователя (имя, формат отправки и настройки суммаризации).
     Args:
         chat_id: ID чата пользователя
     """
     logger.debug(f"Edit subject request for chat_id={chat_id}. Form data: {request.form}")
 
     try:
-        old_subject_name = request.form.get('old_subject', '').strip()
-        new_subject_name = request.form.get('new_subject', '').strip()
-        new_delivery_mode = request.form.get('new_delivery_mode', DEFAULT_DELIVERY_MODE).strip()
-        confirm_duplicate = request.form.get('confirm_duplicate') == 'true' # Для дубликатов у ДРУГИХ юзеров
+        # Основная информация о теме
+        original_subject = request.form.get('original_subject', '').strip()
+        new_subject = request.form.get('subject', '').strip()
+        delivery_mode = request.form.get('delivery_mode', DEFAULT_DELIVERY_MODE)
 
-        # --- КРИТИЧЕСКАЯ ПРОВЕРКА ---
-        if not old_subject_name:
-            logger.error(f"CRITICAL ERROR: 'old_subject' is empty in submitted form for chat_id={chat_id}. Form: {request.form}")
-            flash("Критическая ошибка: Не удалось определить редактируемую тему. Обновите страницу и попробуйте снова.", "danger")
+        # Настройки суммаризации для темы
+        summary_enabled = request.form.get('summary_enabled') == 'on'
+        send_original = request.form.get('send_original') == 'on'
+        prompt_id = request.form.get('prompt_id')
+        if prompt_id:
+            prompt_id = int(prompt_id)
+
+        if not original_subject or not new_subject:
+            flash("Тема не может быть пустой", "danger")
             return redirect(url_for('user_details', chat_id=chat_id))
 
-        # Проверка входных данных
-        if not new_subject_name:
-            flash("Новое имя темы не может быть пустым.", "warning")
-            return redirect(url_for('user_details', chat_id=chat_id))
-        if new_delivery_mode not in ALLOWED_DELIVERY_MODES:
-            flash(f"Недопустимый формат отправки: '{new_delivery_mode}'. Допустимые: {', '.join(ALLOWED_DELIVERY_MODES)}", "warning")
+        if delivery_mode not in ALLOWED_DELIVERY_MODES:
+            flash(f"Неверный формат доставки: {delivery_mode}", "danger")
             return redirect(url_for('user_details', chat_id=chat_id))
 
-        # Получаем текущие темы пользователя, чтобы проверить существование старой темы и ее режим
-        user_subjects_tuples = db_manager.get_user_subjects(chat_id)
-        current_subject_info = None
-        for s_name, s_mode in user_subjects_tuples:
-            if s_name == old_subject_name:
-                current_subject_info = {'name': s_name, 'mode': s_mode}
-                break
+        # Обновляем тему и режим доставки
+        success = True
+        if original_subject != new_subject:
+            # Если тема изменилась - удаляем старую и добавляем новую
+            if not db_manager.delete_subject(chat_id, original_subject):
+                flash(f"Не удалось удалить тему: {original_subject}", "warning")
+                success = False
+            if not db_manager.add_subject(chat_id, new_subject):
+                flash(f"Не удалось добавить тему: {new_subject}", "warning")
+                success = False
+            if success:
+                # Если успешно заменили тему, обновляем режим доставки
+                db_manager.update_subject_delivery_mode(chat_id, new_subject, delivery_mode)
+        else:
+            # Если тема не менялась, просто обновляем режим доставки
+            db_manager.update_subject_delivery_mode(chat_id, original_subject, delivery_mode)
 
-        if not current_subject_info:
-            logger.warning(f"Subject '{old_subject_name}' not found for user {chat_id} during edit attempt.")
-            flash(f"Редактируемая тема '{old_subject_name}' не найдена для этого пользователя. Возможно, она была изменена или удалена.", "danger")
-            return redirect(url_for('user_details', chat_id=chat_id))
+        # Обновляем настройки суммаризации для темы
+        subject_to_update = new_subject if original_subject != new_subject else original_subject
 
-        # Определяем, что изменилось
-        name_changed = (old_subject_name != new_subject_name)
-        mode_changed = (current_subject_info['mode'] != new_delivery_mode)
+        # Обновляем статус суммаризации для темы
+        db_manager.update_subject_summarization(chat_id, subject_to_update, summary_enabled)
 
-        logger.info(f"Editing subject for {chat_id}: old='{old_subject_name}', new='{new_subject_name}', old_mode='{current_subject_info['mode']}', new_mode='{new_delivery_mode}'. Name changed: {name_changed}, Mode changed: {mode_changed}")
+        # Обновляем настройки отправки оригинала и шаблона (эти настройки привязаны к теме)
+        db_manager.update_subject_summarization_settings(chat_id, subject_to_update, prompt_id, send_original)
 
-        if not name_changed and not mode_changed:
-            flash(f"Изменений для темы '{old_subject_name}' не было.", "info")
-            return redirect(url_for('user_details', chat_id=chat_id))
-
-        # --- Логика обновления ---
-        success = False
-        action_description = []
-
-        # 1. Обработка изменения ИМЕНИ (может включать и изменение режима)
-        if name_changed:
-            # Проверка на дубликаты НОВОГО имени у ДРУГИХ пользователей
-            duplicate_subjects = check_duplicate_subjects([new_subject_name], chat_id)
-            if duplicate_subjects and not confirm_duplicate:
-                # Возвращаем шаблон подтверждения (нужно убедиться, что он есть или создать)
-                flash(f"Тема '{new_subject_name}' уже существует у другого пользователя. Подтвердите действие.", "warning")
-                # Передаем все необходимые данные для рендеринга формы подтверждения
-                delivery_modes_config = { # Конфиг нужен для селекта в шаблоне подтверждения
-                    "options": sorted(list(ALLOWED_DELIVERY_MODES)), "default": DEFAULT_DELIVERY_MODE,
-                    "display_map": { DELIVERY_MODE_TEXT: 'Только текст', DELIVERY_MODE_HTML: 'HTML', DELIVERY_MODE_SMART: 'Авто (Smart)', DELIVERY_MODE_PDF: 'PDF' }
-                }
-                return render_template('confirm_edit_subject.html', # Убедитесь, что этот шаблон есть
-                                       old_subject=old_subject_name,
-                                       new_subject=new_subject_name,
-                                       new_delivery_mode=new_delivery_mode,
-                                       chat_id=chat_id,
-                                       user_role=session.get('user_role', 'viewer'),
-                                       delivery_modes_config=delivery_modes_config)
-
-            # Проверка, не пытается ли пользователь переименовать тему в имя, которое УЖЕ ЕСТЬ у НЕГО ЖЕ
-            # (кроме случая, когда old_subject_name == new_subject_name, что уже обработано)
-            existing_new_name = any(s_name == new_subject_name for s_name, s_mode in user_subjects_tuples)
-            if existing_new_name:
-                 flash(f"Тема с именем '{new_subject_name}' уже существует у этого пользователя.", "danger")
-                 return redirect(url_for('user_details', chat_id=chat_id))
-
-
-            # Используем стратегию delete/add для переименования + обновление режима
-            logger.info(f"Attempting rename: Deleting '{old_subject_name}', Adding '{new_subject_name}' with mode '{new_delivery_mode}' for {chat_id}")
-            if db_manager.delete_subject(chat_id, old_subject_name):
-                 # Добавляем с НУЖНЫМ режимом сразу (если add_subject это позволяет, иначе см. ниже)
-                 # Предположим, add_subject принимает режим:
-                 # if db_manager.add_subject(chat_id, new_subject_name, delivery_mode=new_delivery_mode):
-                 # Если add_subject НЕ принимает режим:
-                 if db_manager.add_subject(chat_id, new_subject_name): # Добавит с дефолтным режимом
-                     if db_manager.update_subject_delivery_mode(chat_id, new_subject_name, new_delivery_mode):
-                         success = True
-                         action_description.append(f"Тема переименована в '{new_subject_name}'")
-                         if mode_changed: # Если режим тоже менялся
-                             action_description.append(f"формат установлен на '{new_delivery_mode}'")
-                         else: # Если менялось только имя
-                             action_description.append(f"формат оставлен '{new_delivery_mode}'")
-                     else:
-                        logger.error(f"Failed to update mode for renamed subject '{new_subject_name}' for {chat_id}")
-                        flash(f"Тема переименована в '{new_subject_name}', но НЕ удалось установить формат '{new_delivery_mode}'.", "warning")
-                        # Успех частичный, но тему переименовали
-                        success = True # Считаем успехом переименования
-                        action_description.append(f"Тема переименована в '{new_subject_name}'")
-                        action_description.append(f"ошибка установки формата '{new_delivery_mode}'")
-
-                 else:
-                     logger.error(f"Failed to add new subject '{new_subject_name}' after deleting '{old_subject_name}' for {chat_id}")
-                     flash(f"Ошибка: Удалена старая тема '{old_subject_name}', но НЕ удалось добавить новую '{new_subject_name}'.", "danger")
-                     # Попытка восстановления старой темы (может быть неточной, если режим был не дефолтным)
-                     # db_manager.add_subject(chat_id, old_subject_name)
-            else:
-                logger.error(f"Failed to delete old subject '{old_subject_name}' during rename for {chat_id}")
-                flash(f"Ошибка: Не удалось удалить старую тему '{old_subject_name}' для переименования.", "danger")
-
-        # 2. Обработка изменения ТОЛЬКО режима (имя не менялось)
-        elif mode_changed:
-            logger.info(f"Attempting mode update only for '{old_subject_name}' to '{new_delivery_mode}' for {chat_id}")
-            if db_manager.update_subject_delivery_mode(chat_id, old_subject_name, new_delivery_mode):
-                success = True
-                action_description.append(f"Формат отправки для '{old_subject_name}' изменен на '{new_delivery_mode}'")
-            else:
-                logger.error(f"Failed to update delivery mode for '{old_subject_name}' for {chat_id}")
-                flash(f"Не удалось изменить формат отправки для темы '{old_subject_name}'.", "danger")
-
-        # --- Завершение операции ---
         if success:
-            final_message = " ".join(action_description)
-            flash(f"Успешно: {final_message}", "success")
-            logger.info(f"Subject edit successful for {chat_id}: {final_message}")
-             # Логирование действия
+            flash(f"Настройки темы успешно обновлены", "success")
+
+            # Логирование действия
             if 'user_id' in session:
-                 log_activity(db_manager, session['user_id'], "edit_subject", request.remote_addr,
-                              f"chat={chat_id}, old='{old_subject_name}', new='{new_subject_name}', mode='{new_delivery_mode}'")
-            # Полная инвалидация кэша
+                log_activity(db_manager, session['user_id'], "edit_subject",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject_to_update}")
+
+            # Инвалидация кэша
             invalidate_all_caches()
-        # else:
-            # Сообщение об ошибке уже должно было быть отправлено через flash выше
+        else:
+            flash("Произошла ошибка при обновлении темы", "danger")
 
         return redirect(url_for('user_details', chat_id=chat_id))
 
     except Exception as e:
-        logger.error(f"CRITICAL Exception during edit_subject for chat_id={chat_id}: {e}", exc_info=True)
-        flash(f"Произошла непредвиденная ошибка при редактировании темы: {e}", "danger")
+        logger.error(f"Ошибка при редактировании темы для пользователя {chat_id}: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('user_details', chat_id=chat_id))
 
 
@@ -1175,10 +1234,11 @@ def delete_user(chat_id: str):
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('users'))
 
+
 @app.route('/user/<chat_id>/update-notes', methods=['POST'])
 @login_required
-@operator_required # Разрешаем операторам и админам редактировать заметки
-@limiter.limit("50 per minute") # Ограничиваем частоту запросов
+@operator_required  # Разрешаем операторам и админам редактировать заметки
+@limiter.limit("50 per minute")  # Ограничиваем частоту запросов
 def update_user_notes(chat_id: str):
     """
     Обновление заметок пользователя.
@@ -1409,7 +1469,7 @@ def add_user():
             chat_id = request.form.get('chat_id', '').strip()
             status = 'Enable' if request.form.get('status') == 'enable' else 'Disable'
             subjects_text = request.form.get('subjects', '').strip()
-            notes = request.form.get('notes', '').strip() # <<< Получаем заметки из формы
+            notes = request.form.get('notes', '').strip()  # <<< Получаем заметки из формы
             confirm_overwrite = request.form.get('confirm_overwrite') == 'true'
             confirm_duplicate_subjects = request.form.get('confirm_duplicate_subjects') == 'true'
 
@@ -1448,7 +1508,7 @@ def add_user():
                                        chat_id=chat_id,
                                        status=status,
                                        subjects=subjects_text,
-                                       notes=notes, # <<< Передаем заметки в шаблон подтверждения
+                                       notes=notes,  # <<< Передаем заметки в шаблон подтверждения
                                        user_role=session.get('user_role', 'viewer'))
 
             # Если есть дубликаты тем и нет подтверждения, возвращаем форму подтверждения
@@ -1459,14 +1519,15 @@ def add_user():
                                        chat_id=chat_id,
                                        status=status,
                                        subjects=subjects_text,
-                                       notes=notes, # <<< Передаем заметки в шаблон подтверждения
+                                       notes=notes,  # <<< Передаем заметки в шаблон подтверждения
                                        duplicate_subjects=True,
                                        user_role=session.get('user_role', 'viewer'))
 
             # Добавление/обновление пользователя
-            logger.info(f"Отправка запроса на добавление/обновление пользователя {chat_id} с заметками ({len(notes)} символов)")
+            logger.info(
+                f"Отправка запроса на добавление/обновление пользователя {chat_id} с заметками ({len(notes)} символов)")
             # Передаем заметки в db_manager
-            result = db_manager.add_user(chat_id, status, notes=notes) # Режим доставки будет по умолчанию
+            result = db_manager.add_user(chat_id, status, notes=notes)  # Режим доставки будет по умолчанию
 
             if result:
                 action = "обновлен" if user_exists else "добавлен"
@@ -1510,27 +1571,13 @@ def add_user():
             flash(f"Произошла ошибка: {e}", "danger")
             # Возвращаем данные в форму
             return render_template('add_user.html',
-                                   chat_id=request.form.get('chat_id',''), status=request.form.get('status','enable'),
-                                   subjects=request.form.get('subjects',''), notes=request.form.get('notes',''),
+                                   chat_id=request.form.get('chat_id', ''), status=request.form.get('status', 'enable'),
+                                   subjects=request.form.get('subjects', ''), notes=request.form.get('notes', ''),
                                    user_role=session.get('user_role', 'viewer'))
 
     # Для GET запроса
     return render_template('add_user.html', user_role=session.get('user_role', 'viewer'))
 
-
-@app.route('/bot-status')
-@login_required
-def bot_status():
-    """Страница со статусом бота и его управлением."""
-    try:
-        # Всегда получаем актуальный статус, игнорируя кэш
-        status = get_bot_status(bypass_cache=True)
-        user_role = session.get('user_role', 'viewer')
-        return render_template('bot_status.html', status=status, user_role=user_role)
-    except Exception as e:
-        logger.error(f"Ошибка при получении статуса бота: {e}", exc_info=True)
-        flash(f"Произошла ошибка: {e}", "danger")
-        return redirect(url_for('index'))
 
 
 @app.route('/bot-status/start', methods=['POST'])
@@ -1567,7 +1614,7 @@ def start_bot_handler():
         flash(f"Ошибка при запуске бота: {e}", "danger")
         logger.error(f"Ошибка при запуске бота: {e}", exc_info=True)
 
-    return redirect(url_for('bot_status'))
+    return redirect(url_for('diagnostics'))
 
 
 @app.route('/bot-status/stop', methods=['POST'])
@@ -1604,7 +1651,7 @@ def stop_bot_handler():
         flash(f"Ошибка при остановке бота: {e}", "danger")
         logger.error(f"Ошибка при остановке бота: {e}", exc_info=True)
 
-    return redirect(url_for('bot_status'))
+    return redirect(url_for('diagnostics'))
 
 
 @app.route('/api/bot-status')
@@ -1765,6 +1812,494 @@ def optimization_status():
     else:
         return jsonify({"status": "not_running"})
 
+
+@app.route('/summarization-prompts')
+@login_required
+@operator_required
+def summarization_prompts():
+    """Управление шаблонами запросов для суммаризации."""
+    try:
+        # Получаем параметры пагинации и поиска
+        page = request.args.get('page', 1, type=int)
+        search_query = request.args.get('search', '').strip()  # Активируем серверный поиск
+        per_page = ITEMS_PER_PAGE
+
+        # Получаем все доступные шаблоны запросов для суммаризации
+        all_prompts = db_manager.get_all_summarization_prompts()
+
+        # Применяем фильтрацию по поисковому запросу
+        if search_query:
+            # Преобразуем поисковый запрос в нижний регистр для нечувствительного сравнения
+            search_query_lower = search_query.lower()
+            filtered_prompts = []
+
+            # Фильтруем шаблоны по поисковому запросу
+            for prompt in all_prompts:
+                if (search_query_lower in prompt.get('name', '').lower() or
+                        search_query_lower in prompt.get('prompt_text', '').lower()):
+                    filtered_prompts.append(prompt)
+
+            all_prompts = filtered_prompts
+            logger.debug(f"После применения фильтра поиска '{search_query}' осталось {len(all_prompts)} шаблонов")
+
+        # Определяем, какой промпт установлен как дефолтный
+        default_prompt_id = None
+        for prompt in all_prompts:
+            if prompt.get('is_default'):
+                default_prompt_id = prompt.get('id')
+
+        # Пагинация
+        total_prompts = len(all_prompts)
+        total_pages = math.ceil(total_prompts / per_page) if total_prompts > 0 else 1
+
+        # Проверка валидности текущей страницы
+        if page > total_pages:
+            page = 1
+
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        paginated_prompts = all_prompts[start_idx:end_idx]
+
+        return render_template('summarization_prompts.html',
+                               prompts=paginated_prompts,
+                               page=page,
+                               total_pages=total_pages,
+                               total_prompts=total_prompts,
+                               search_query=search_query,
+                               default_prompt_id=default_prompt_id,
+                               user_role=session.get('user_role', 'viewer'))
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке шаблонов суммаризации: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('index'))
+
+
+@app.route('/summarization-prompts/add', methods=['GET', 'POST'])
+@login_required
+@operator_required
+def add_summarization_prompt():
+    """Добавление нового шаблона запроса для суммаризации."""
+    if request.method == 'POST':
+        try:
+            name = request.form.get('name', '').strip()
+            prompt_text = request.form.get('prompt_text', '').strip()
+            is_default = request.form.get('is_default') == 'true'
+            confirm = request.form.get('confirm_duplicate') == 'true'
+
+            if not name or not prompt_text:
+                flash("Имя и текст запроса обязательны", "warning")
+                return render_template('add_summarization_prompt.html',
+                                       user_role=session.get('user_role', 'viewer'))
+
+            # Проверка на дублирование имени
+            if db_manager.check_summarization_prompt_name_exists(name):
+                flash(f"Шаблон с именем '{name}' уже существует. Пожалуйста, выберите другое имя.", "danger")
+                return render_template('add_summarization_prompt.html',
+                                       name=name,
+                                       prompt_text=prompt_text,
+                                       is_default=is_default,
+                                       user_role=session.get('user_role', 'viewer'))
+
+            # Если не подтверждено, проверяем на дублирование текста промпта
+            if not confirm:
+                similar_prompts = db_manager.find_similar_prompts(prompt_text)
+                if similar_prompts:
+                    # Если найдены похожие промпты, показываем страницу подтверждения
+                    return render_template('confirm_prompt_duplicate.html',
+                                           name=name,
+                                           prompt_text=prompt_text,
+                                           is_default=is_default,
+                                           similar_prompts=similar_prompts,
+                                           user_role=session.get('user_role', 'viewer'))
+
+            # Добавляем новый шаблон
+            prompt_id = db_manager.create_summarization_prompt(name, prompt_text, is_default)
+
+            if prompt_id:
+                flash(f"Шаблон суммаризации '{name}' успешно добавлен", "success")
+
+                # Логирование действия
+                if 'user_id' in session:
+                    log_activity(db_manager, session['user_id'], "add_summarization_prompt",
+                                 request.remote_addr, f"name={name}")
+
+                # Инвалидация кэша
+                invalidate_all_caches()
+
+                return redirect(url_for('summarization_prompts'))
+            else:
+                flash(f"Не удалось добавить шаблон суммаризации", "danger")
+        except Exception as e:
+            logger.error(f"Ошибка при добавлении шаблона суммаризации: {e}", exc_info=True)
+            flash(f"Произошла ошибка: {e}", "danger")
+
+    return render_template('add_summarization_prompt.html',
+                           user_role=session.get('user_role', 'viewer'))
+
+
+@app.route('/summarization-prompts/edit/<int:prompt_id>', methods=['GET', 'POST'])
+@login_required
+@operator_required
+def edit_summarization_prompt(prompt_id):
+    """Редактирование шаблона запроса для суммаризации."""
+    try:
+        # Получаем текущий промпт
+        current_prompt = db_manager.get_summarization_prompt_by_id(prompt_id)
+        if not current_prompt:
+            flash("Шаблон суммаризации не найден", "danger")
+            return redirect(url_for('summarization_prompts'))
+
+        if request.method == 'POST':
+            name = request.form.get('name', '').strip()
+            prompt_text = request.form.get('prompt_text', '').strip()
+            is_default = request.form.get('is_default') == 'true'
+            confirm = request.form.get('confirm_duplicate') == 'true'
+
+            # Проверяем, является ли запрос AJAX-запросом
+            is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+
+            if not name or not prompt_text:
+                if is_ajax:
+                    return jsonify({'success': False, 'message': 'Имя и текст запроса обязательны'})
+                flash("Имя и текст запроса обязательны", "warning")
+                return redirect(url_for('edit_summarization_prompt', prompt_id=prompt_id))
+
+            # Получаем текущие данные для сравнения
+            if name != current_prompt['name'] and db_manager.check_summarization_prompt_name_exists(name, prompt_id):
+                if is_ajax:
+                    return jsonify({
+                        'success': False,
+                        'message': f"Шаблон с именем '{name}' уже существует. Пожалуйста, выберите другое имя."
+                    })
+                flash(f"Шаблон с именем '{name}' уже существует. Пожалуйста, выберите другое имя.", "danger")
+                return render_template('edit_summarization_prompt.html',
+                                      prompt={"id": prompt_id, "name": name, "prompt_text": prompt_text,
+                                             "is_default_for_new_users": is_default},
+                                      user_role=session.get('user_role', 'viewer'))
+
+            # Проверка: если промпт уже был по умолчанию, нельзя снять эту галку
+            # Это может произойти только через установку другого шаблона как шаблона по умолчанию
+            is_currently_default = current_prompt.get('is_default_for_new_users', False)
+            if is_currently_default and not is_default:
+                is_default = True  # Принудительно оставляем статус по умолчанию
+                logger.info(f"Попытка отключить шаблон по умолчанию предотвращена для промпта ID {prompt_id}")
+
+            # Если текст промпта изменился и нет подтверждения, проверяем на дублирование
+            if prompt_text != current_prompt['prompt_text'] and not confirm:
+                similar_prompts = db_manager.find_similar_prompts(prompt_text, prompt_id)
+                if similar_prompts:
+                    if is_ajax:
+                        return jsonify({
+                            'success': False,
+                            'message': 'Найдены похожие шаблоны',
+                            'similar_prompts': similar_prompts,
+                            'require_confirmation': True
+                        })
+                    # Если найдены похожие промпты, показываем страницу подтверждения
+                    return render_template('confirm_prompt_duplicate.html',
+                                         prompt_id=prompt_id,
+                                         name=name,
+                                         prompt_text=prompt_text,
+                                         is_default=is_default,
+                                         edit_mode=True,
+                                         similar_prompts=similar_prompts,
+                                         user_role=session.get('user_role', 'viewer'))
+
+            # Обновляем шаблон через db_manager
+            # В методе update_summarization_prompt уже есть проверка на единственный шаблон по умолчанию
+            if db_manager.update_summarization_prompt(prompt_id, name, prompt_text, is_default):
+                # Инвалидация кэша
+                invalidate_all_caches()
+
+                # Логирование действия
+                if 'user_id' in session:
+                    log_activity(db_manager, session['user_id'], "edit_summarization_prompt",
+                             request.remote_addr, f"prompt_id={prompt_id}, name={name}, is_default={is_default}")
+
+                if is_ajax:
+                    return jsonify({
+                        'success': True,
+                        'message': f"Шаблон суммаризации '{name}' успешно обновлен",
+                        'name': name,
+                        'prompt_text': prompt_text,
+                        'is_default': is_default,
+                        'id': prompt_id
+                    })
+
+                flash(f"Шаблон суммаризации '{name}' успешно обновлен", "success")
+                return redirect(url_for('summarization_prompts'))
+            else:
+                if is_ajax:
+                    return jsonify({'success': False, 'message': 'Не удалось обновить шаблон суммаризации'})
+                flash(f"Не удалось обновить шаблон суммаризации", "danger")
+                return redirect(url_for('edit_summarization_prompt', prompt_id=prompt_id))
+
+        # GET запрос - загружаем данные шаблона для формы
+        # Здесь важно правильно передать структуру данных шаблона
+        # включая правильное имя атрибута для статуса по умолчанию
+        return render_template('edit_summarization_prompt.html',
+                             prompt=current_prompt,
+                             user_role=session.get('user_role', 'viewer'))
+
+    except Exception as e:
+        logger.error(f"Ошибка при редактировании шаблона суммаризации: {e}", exc_info=True)
+        if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+            return jsonify({'success': False, 'message': str(e)})
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('summarization_prompts'))
+
+
+@app.route('/summarization-prompts/delete/<int:prompt_id>', methods=['POST'])
+@login_required
+@operator_required
+def delete_summarization_prompt(prompt_id):
+    """Удаление шаблона запроса для суммаризации."""
+    try:
+        # Проверяем, что это не последний шаблон
+        prompts = db_manager.get_all_summarization_prompts()
+        if len(prompts) <= 1:
+            flash("Нельзя удалить последний шаблон суммаризации", "warning")
+            return redirect(url_for('summarization_prompts'))
+
+        # Получаем имя для логирования до удаления
+        prompt = db_manager.get_summarization_prompt_by_id(prompt_id)
+        if not prompt:
+            flash("Шаблон суммаризации не найден", "warning")
+            return redirect(url_for('summarization_prompts'))
+
+        # Проверка на шаблон по умолчанию
+        if prompt.get('is_default_for_new_users', False):
+            flash("Нельзя удалить шаблон по умолчанию. Сначала назначьте другой шаблон по умолчанию.", "warning")
+            return redirect(url_for('summarization_prompts'))
+
+        # Сохраняем информацию о шаблоне до удаления
+        prompt_name = prompt['name']
+
+        # Удаляем шаблон
+        db_manager.delete_summarization_prompt(prompt_id)
+
+        # Проверяем фактическое удаление шаблона
+        check_prompt = db_manager.get_summarization_prompt_by_id(prompt_id)
+        if check_prompt is None:
+            # Удаление прошло успешно
+            flash(f"Шаблон суммаризации '{prompt_name}' успешно удален", "success")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "delete_summarization_prompt",
+                             request.remote_addr, f"prompt_id={prompt_id}, name={prompt_name}")
+
+            # Инвалидация кэша
+            invalidate_caches()
+        else:
+            # Шаблон все еще существует
+            flash("Невозможно удалить этот шаблон. Пожалуйста, проверьте, не используется ли он.", "warning")
+
+        return redirect(url_for('summarization_prompts'))
+    except Exception as e:
+        logger.error(f"Ошибка при удалении шаблона суммаризации: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('summarization_prompts'))
+
+
+@app.route('/user/<chat_id>/toggle-summarization', methods=['POST'])
+@login_required
+@operator_required
+def toggle_user_summarization(chat_id):
+    """Включение/отключение возможности управлять суммаризацией для пользователя."""
+    is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest' or request.form.get('from_modal') == 'true'
+
+    try:
+        # Получаем текущие настройки пользователя
+        settings = db_manager.get_user_summarization_settings(chat_id)
+        current_status = settings.get('allow_summarization', False)
+
+        # Инвертируем текущий статус
+        new_status = not current_status
+
+        # При включении глобальной суммаризации, фиксируем текущее состояние всех тем
+        if new_status:
+            subjects_with_modes = db_manager.get_user_subjects(chat_id)
+            for subject, _ in subjects_with_modes:
+                # Проверяем наличие записи в БД для этой темы
+                subject_settings = db_manager.get_subject_summarization_settings(chat_id, subject)
+                if not subject_settings:
+                    # Если записи нет, создаем ее с выключенной суммаризацией по умолчанию
+                    # и со стандартными настройками (отправка оригинала включена)
+                    db_manager.update_subject_summarization(chat_id, subject, False)
+                    # Получаем ID промпта по умолчанию
+                    prompt_id = None
+                    all_prompts = db_manager.get_all_summarization_prompts()
+                    for prompt in all_prompts:
+                        if prompt.get('is_default_for_new_users', False):
+                            prompt_id = prompt['id']
+                            break
+                    db_manager.update_subject_summarization_settings(chat_id, subject, prompt_id, True)
+
+        # Обновляем настройки
+        if db_manager.update_user_summarization_settings(chat_id, new_status):
+            status_text = "разрешена" if new_status else "запрещена"
+
+            if is_ajax:
+                return jsonify({
+                    'success': True,
+                    'status': new_status,
+                    'message': f"Возможность настройки суммаризации для пользователя {chat_id} {status_text}"
+                })
+            else:
+                flash(f"Возможность настройки суммаризации для пользователя {chat_id} {status_text}", "success")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "toggle_summarization",
+                             request.remote_addr, f"chat_id={chat_id}, allow_summarization={status_text}")
+
+            # Инвалидация кэша
+            invalidate_all_caches()
+        else:
+            if is_ajax:
+                return jsonify({
+                    'success': False,
+                    'error': f"Не удалось изменить статус суммаризации для пользователя {chat_id}"
+                })
+            else:
+                flash(f"Не удалось изменить статус суммаризации для пользователя {chat_id}", "danger")
+
+        if not is_ajax:
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+    except Exception as e:
+        logger.error(f"Ошибка при изменении статуса суммаризации для пользователя {chat_id}: {e}", exc_info=True)
+
+        if is_ajax:
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            })
+        else:
+            flash(f"Произошла ошибка: {e}", "danger")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+
+@app.route('/user/<chat_id>/set-summarization-prompt', methods=['POST'])
+@login_required
+@operator_required
+def set_user_summarization_prompt(chat_id):
+    """Установка шаблона запроса для суммаризации пользователя."""
+    try:
+        prompt_id = request.form.get('prompt_id')
+        subject = request.form.get('subject')  # Получаем тему, для которой меняем промпт
+
+        if prompt_id:
+            prompt_id = int(prompt_id)
+
+        if not subject:
+            flash("Тема не указана", "warning")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+        # Получаем текущие настройки темы
+        subject_settings = db_manager.get_subject_summarization_settings(chat_id, subject)
+        send_original = subject_settings.get('send_original', True)
+
+        # Обновляем настройки для конкретной темы, а не глобально для пользователя
+        if db_manager.update_subject_summarization_settings(chat_id, subject, prompt_id, send_original):
+            flash(f"Шаблон суммаризации для темы '{subject}' успешно изменен", "success")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "set_subject_summarization_prompt",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject}, prompt_id={prompt_id}")
+
+            # Инвалидация кэша
+            invalidate_all_caches()
+        else:
+            flash(f"Не удалось изменить шаблон суммаризации для темы '{subject}'", "danger")
+
+        return redirect(url_for('user_details', chat_id=chat_id))
+    except Exception as e:
+        logger.error(f"Ошибка при изменении шаблона суммаризации: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('user_details', chat_id=chat_id))
+
+
+@app.route('/user/<chat_id>/toggle-original-with-summary', methods=['POST'])
+@login_required
+@operator_required
+def toggle_original_with_summary(chat_id):
+    """Включение/отключение отправки оригинала вместе с суммаризацией."""
+    try:
+        subject = request.form.get('subject')
+
+        if not subject:
+            flash("Тема не указана", "warning")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+        # Получаем текущие настройки темы
+        subject_settings = db_manager.get_subject_summarization_settings(chat_id, subject)
+
+        # Переключаем статус отправки оригинала
+        current_send_original = subject_settings.get('send_original', True)
+        new_send_original = not current_send_original
+        prompt_id = subject_settings.get('prompt_id')
+
+        # Обновляем настройки для конкретной темы
+        if db_manager.update_subject_summarization_settings(chat_id, subject, prompt_id, new_send_original):
+            status_text = "включена" if new_send_original else "отключена"
+            flash(f"Отправка оригинала с суммаризацией для темы '{subject}' {status_text}", "success")
+
+            # Логирование действия
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "toggle_original_with_summary",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject}, status={status_text}")
+
+            # Инвалидация кэша
+            invalidate_all_caches()
+        else:
+            flash(f"Не удалось изменить статус отправки оригинала для темы '{subject}'", "danger")
+
+        return redirect(url_for('user_details', chat_id=chat_id))
+    except Exception as e:
+        logger.error(f"Ошибка при изменении статуса отправки оригинала: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('user_details', chat_id=chat_id))
+
+
+@app.route('/user/<chat_id>/toggle-subject-summarization', methods=['POST'])
+@login_required
+@operator_required
+def toggle_subject_summarization(chat_id):
+    try:
+        subject = request.form.get('subject', '').strip()
+
+        if not subject:
+            flash("Тема не указана", "warning")
+            return redirect(url_for('user_details', chat_id=chat_id))
+
+        current_status = db_manager.get_subject_summarization_status(chat_id, subject)
+        new_status = not current_status
+
+        if db_manager.update_subject_summarization(chat_id, subject, new_status):
+            status_text = "включена" if new_status else "отключена"
+            flash(f"Суммаризация для темы '{subject}' {status_text}", "success")
+
+            # Логирование и инвалидация кэша...
+            if 'user_id' in session:
+                log_activity(db_manager, session['user_id'], "toggle_subject_summarization",
+                             request.remote_addr, f"chat_id={chat_id}, subject={subject}, status={status_text}")
+
+            invalidate_all_caches()
+        else:
+            flash(f"Не удалось изменить статус суммаризации для темы '{subject}'", "danger")
+
+        # Всегда делаем редирект без проверок на AJAX
+        return redirect(url_for('user_details', chat_id=chat_id))
+
+    except Exception as e:
+        logger.error(f"Ошибка: {e}", exc_info=True)
+        flash(f"Произошла ошибка: {e}", "danger")
+        return redirect(url_for('user_details', chat_id=chat_id))
+
+
 @app.route('/help')
 @login_required
 def help():
@@ -1784,51 +2319,52 @@ def help():
 def diagnostics():
     """Страница диагностики системы."""
     try:
+        # Получение данных о процессах
         processes = []
-        for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
-            try:
-                pinfo = proc.as_dict(['pid', 'name', 'cmdline', 'create_time'])
-                if 'python' in pinfo.get('name', '').lower():
-                    # Преобразуем командную строку в строку
-                    cmdline = ' '.join([str(cmd) for cmd in pinfo.get('cmdline', []) if cmd])
-                    pinfo['cmdline_str'] = cmdline
-                    processes.append(pinfo)
-            except Exception:
-                pass
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline', 'create_time']):
+                process_info = proc.info
+                cmdline_str = " ".join(process_info.get('cmdline', [])) if process_info.get('cmdline') else "-"
+                create_time = datetime.fromtimestamp(process_info['create_time']).strftime(
+                    '%Y-%m-%d %H:%M:%S') if process_info.get('create_time') else "-"
+                processes.append({
+                    'pid': process_info['pid'],
+                    'name': process_info['name'],
+                    'cmdline_str': cmdline_str,
+                    'create_time': create_time
+                })
+        except Exception as e:
+            logger.error(f"Ошибка при получении данных о процессах: {e}", exc_info=True)
 
-        # Проверка файлов БД
+        # Получение данных о файлах БД
         db_files = {}
-        db_path = Path(settings.DATABASE_PATH)
-        if db_path.exists():
-            db_files['main'] = {
-                'size': db_path.stat().st_size // 1024,  # size in KB
-                'mtime': datetime.fromtimestamp(db_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-            }
+        try:
+            db_dir = Path(settings.DATABASE_PATH).parent
+            for file_path in db_dir.glob("*.db*"):
+                size_kb = round(file_path.stat().st_size / 1024, 2)
+                mtime = datetime.fromtimestamp(file_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+                db_files[file_path.name] = {
+                    'size': size_kb,
+                    'mtime': mtime
+                }
+        except Exception as e:
+            logger.error(f"Ошибка при получении данных о файлах БД: {e}", exc_info=True)
 
-        # Проверка WAL файлов
-        wal_path = Path(f"{settings.DATABASE_PATH}-wal")
-        if wal_path.exists():
-            db_files['wal'] = {
-                'size': wal_path.stat().st_size // 1024,  # size in KB
-                'mtime': datetime.fromtimestamp(wal_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-            }
+        # Флаг оптимизации
+        optimization_started = request.args.get('optimization_started', '0') == '1'
 
-        shm_path = Path(f"{settings.DATABASE_PATH}-shm")
-        if shm_path.exists():
-            db_files['shm'] = {
-                'size': shm_path.stat().st_size // 1024,  # size in KB
-                'mtime': datetime.fromtimestamp(shm_path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
-            }
-
-        # Статус бота
-        bot_status_info = get_bot_status(bypass_cache=True)
+        # Получаем статус бота (ранее использовался только в bot_status)
+        bot_status = get_bot_status(bypass_cache=True)
 
         return render_template('diagnostics.html',
                                processes=processes,
                                db_files=db_files,
-                               bot_status=bot_status_info)
+                               optimization_started=optimization_started,
+                               bot_status=bot_status,
+                               user_role=session.get('user_role', 'viewer'))
+
     except Exception as e:
-        logger.error(f"Ошибка при загрузке страницы диагностики: {e}", exc_info=True)
+        logger.error(f"Ошибка на странице диагностики: {e}", exc_info=True)
         flash(f"Произошла ошибка: {e}", "danger")
         return redirect(url_for('index'))
 
@@ -1840,14 +2376,57 @@ def diagnostics():
 def admin_users():
     """Управление административными пользователями."""
     try:
+        # Получаем параметры пагинации и поиска
+        page = request.args.get('page', 1, type=int)
+        search_query = request.args.get('search', '').strip()
+        per_page = ITEMS_PER_PAGE
+
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
+
+            # Получаем всех административных пользователей
             cursor.execute("""
                 SELECT id, username, role, created_at, last_login, is_active 
                 FROM admin_users ORDER BY username
             """)
-            users = cursor.fetchall()
-            return render_template('admin_users.html', users=users, user_role='admin')
+            all_users = cursor.fetchall()
+
+            # Применяем фильтрацию по поисковому запросу
+            if search_query:
+                search_query_lower = search_query.lower()
+                filtered_users = []
+
+                # Фильтруем пользователей по поисковому запросу
+                for user in all_users:
+                    if (search_query_lower in str(user['username']).lower() or
+                            search_query_lower in str(user['role']).lower() or
+                            (user['last_login'] and search_query_lower in str(user['last_login']).lower())):
+                        filtered_users.append(user)
+
+                all_users = filtered_users
+                logger.debug(
+                    f"После применения фильтра поиска '{search_query}' осталось {len(all_users)} администраторов")
+
+            # Пагинация применяется к отфильтрованным данным
+            total_users = len(all_users)
+            total_pages = math.ceil(total_users / per_page) if total_users > 0 else 1
+
+            # Исправляем страницу, если она вышла за пределы после фильтрации
+            if page > total_pages:
+                page = 1
+
+            # Применяем пагинацию
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            paginated_users = all_users[start_idx:end_idx]
+
+            return render_template('admin_users.html',
+                                   users=paginated_users,
+                                   page=page,
+                                   total_pages=total_pages,
+                                   total_users=total_users,
+                                   search_query=search_query,
+                                   user_role='admin')
     except Exception as e:
         logger.error(f"Ошибка при получении списка пользователей админки: {e}")
         flash(f"Произошла ошибка: {e}", "danger")
@@ -1863,6 +2442,7 @@ def add_admin_user():
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '')
         role = request.form.get('role', 'viewer')
+        is_active = request.form.get('is_active') == 'true'  # New parameter
 
         if not username or not password:
             flash("Имя пользователя и пароль обязательны", "warning")
@@ -1880,18 +2460,14 @@ def add_admin_user():
                 # Хешируем пароль и добавляем пользователя
                 password_hash = hash_password(password)
                 cursor.execute(
-                    "INSERT INTO admin_users (username, password_hash, role) VALUES (?, ?, ?)",
-                    (username, password_hash, role)
+                    "INSERT INTO admin_users (username, password_hash, role, is_active) VALUES (?, ?, ?, ?)",
+                    (username, password_hash, role, is_active)
                 )
                 conn.commit()
 
-                # Получаем ID нового пользователя
-                cursor.execute("SELECT id FROM admin_users WHERE username = ?", (username,))
-                user_id = cursor.fetchone()['id']
-
                 # Логируем действие
                 log_activity(db_manager, session['user_id'], f"created_user",
-                             request.remote_addr, f"username={username}, role={role}")
+                             request.remote_addr, f"username={username}, role={role}, is_active={is_active}")
 
                 flash(f"Пользователь {username} успешно добавлен", "success")
                 return redirect(url_for('admin_users'))
@@ -2007,46 +2583,69 @@ def delete_admin_user(user_id):
         return redirect(url_for('admin_users'))
 
 
-@app.route('/activity-log')
+@app.route('/admin/activity-log')
 @login_required
 @admin_required
 def activity_log():
-    """Просмотр журнала активности пользователей."""
+    """Просмотр журнала активности администраторов."""
     try:
         page = request.args.get('page', 1, type=int)
-        per_page = 50  # Показываем больше записей на странице
+        search_query = request.args.get('search', '').strip()
+        per_page = ITEMS_PER_PAGE
 
         with db_manager.get_connection() as conn:
             cursor = conn.cursor()
 
-            # Получаем общее количество записей
-            cursor.execute("SELECT COUNT(*) FROM activity_log")
-            total_entries = cursor.fetchone()[0]
-
-            # Пагинация
-            total_pages = math.ceil(total_entries / per_page)
-            offset = (page - 1) * per_page
-
-            # Получаем записи журнала с информацией о пользователях
+            # Получаем все записи с именами пользователей через JOIN
             cursor.execute("""
-                SELECT l.id, l.user_id, u.username, l.action, l.timestamp, l.ip_address, l.resource
+                SELECT l.id, u.username, l.action, l.timestamp, l.ip_address, l.resource 
                 FROM activity_log l
                 LEFT JOIN admin_users u ON l.user_id = u.id
                 ORDER BY l.timestamp DESC
-                LIMIT ? OFFSET ?
-            """, (per_page, offset))
+            """)
+            all_logs = cursor.fetchall()
 
-            logs = cursor.fetchall()
+            # Применяем фильтрацию по поисковому запросу, если он задан
+            if search_query:
+                search_query_lower = search_query.lower()
+                filtered_logs = []
+
+                # Фильтруем по всем полям
+                for log in all_logs:
+                    if (search_query_lower in str(log['id']).lower() or
+                            (log['username'] and search_query_lower in str(log['username']).lower()) or
+                            search_query_lower in str(log['action']).lower() or
+                            search_query_lower in str(log['timestamp']).lower() or
+                            (log['ip_address'] and search_query_lower in str(log['ip_address']).lower()) or
+                            (log['resource'] and search_query_lower in str(log['resource']).lower())):
+                        filtered_logs.append(log)
+
+                all_logs = filtered_logs
+                logger.debug(f"После применения фильтра поиска '{search_query}' осталось {len(all_logs)} записей")
+
+            # Пагинация
+            total_logs = len(all_logs)
+            total_pages = math.ceil(total_logs / per_page) if total_logs > 0 else 1
+
+            # Исправляем страницу, если она вышла за пределы после фильтрации
+            if page > total_pages:
+                page = 1
+
+            # Применяем пагинацию
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            paginated_logs = all_logs[start_idx:end_idx]
 
             return render_template('activity_log.html',
-                                   logs=logs,
+                                   logs=paginated_logs,
                                    page=page,
                                    total_pages=total_pages,
-                                   user_role='admin')
+                                   total_logs=total_logs,
+                                   search_query=search_query)
     except Exception as e:
-        logger.error(f"Ошибка при загрузке журнала активности: {e}")
+        logger.error(f"Ошибка при получении журнала активности: {e}")
         flash(f"Произошла ошибка: {e}", "danger")
-        return redirect(url_for('index'))
+        return redirect(url_for('admin_users'))
 
 
 @app.errorhandler(404)
@@ -2076,13 +2675,14 @@ def forbidden_handler(e):
     logger.warning(f"Запрещенный доступ: {request.path} с IP {request.remote_addr}")
     return render_template('403.html', error=str(e), user_role=session.get('user_role', 'viewer')), 403
 
+
 @app.route('/shark-hunter')
 @login_required
-@admin_required # <<<--- Этот декоратор разрешает доступ только админам
+@admin_required  # <<<--- Этот декоратор разрешает доступ только админам
 def shark_hunter_game():
     """Страница с игрой 'Охотник за сокровищами'."""
     try:
-        user_role = session.get('user_role', 'viewer') # Все равно передаем для шаблона base.html
+        user_role = session.get('user_role', 'viewer')  # Все равно передаем для шаблона base.html
         # Просто рендерим шаблон, вся логика игры на фронтенде
         return render_template('shark_hunter.html', user_role=user_role)
     except Exception as e:

@@ -93,6 +93,9 @@ class DatabaseManager:
         )
         self.health_check_thread.start()
 
+        # Инициализация таблиц для суммаризации
+        self._initialize_summarization_tables()
+
     def _init_connection_pool(self):
         """Инициализирует пул соединений."""
         for _ in range(self._MAX_CONNECTIONS):
@@ -144,7 +147,7 @@ class DatabaseManager:
             raise
 
     @contextmanager
-    def get_connection(self) -> sqlite3.Connection:
+    def get_connection(self):
         """
         Получение соединения с базой данных из пула с поддержкой многопоточности.
         Реализовано как контекстный менеджер для автоматического возврата соединения в пул.
@@ -379,13 +382,6 @@ class DatabaseManager:
                     columns = [col['name'] for col in cursor.fetchall()]
                     if 'delivery_mode' in columns:
                         logger.warning("Обнаружен столбец 'delivery_mode' в таблице 'users'. Выполняется удаление...")
-                        # SQLite не поддерживает DROP COLUMN напрямую в старых версиях
-                        # Безопасный способ - пересоздать таблицу, но это сложно с данными.
-                        # Попытаемся ALTER TABLE RENAME COLUMN (если возможно) или просто проигнорируем
-                        # В новых версиях SQLite (3.35.0+) можно:
-                        # cursor.execute('ALTER TABLE users DROP COLUMN delivery_mode')
-                        # Для совместимости пока оставим как есть, но столбец использоваться не будет.
-                        # Если возникнут проблемы, потребуется ручная миграция.
                         logger.info("Столбец 'delivery_mode' в 'users' будет проигнорирован.")
                 except Exception as alter_err:
                     logger.error(f"Ошибка при проверке/удалении столбца 'delivery_mode' из 'users': {alter_err}")
@@ -434,6 +430,16 @@ class DatabaseManager:
                         raise  # Прерываем инициализацию, если миграция не удалась
                 else:
                     logger.debug("Столбец 'delivery_mode' уже существует в 'subjects'.")
+
+                logger.debug("Проверка таблицы 'user_delivery_settings'...")
+                cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS user_delivery_settings (
+                                chat_id TEXT PRIMARY KEY,
+                                allow_delivery_mode_selection INTEGER DEFAULT 0,
+                                FOREIGN KEY (chat_id) REFERENCES users (chat_id) ON DELETE CASCADE
+                            )
+                            ''')
+                logger.debug("Таблица 'user_delivery_settings' проверена/создана.")
 
                 # Создание индексов для ускорения поиска
                 logger.debug("Проверка индексов для 'subjects'...")
@@ -546,6 +552,112 @@ class DatabaseManager:
                 conn.rollback()
             except Exception as rb_err:
                 logger.error(f"Ошибка при откате транзакции: {rb_err}")
+            return False
+
+    def get_user_delivery_settings(self, chat_id: str) -> Dict[str, Any]:
+        """
+        Получает настройки режима доставки для пользователя.
+        По умолчанию выбор формата доставки запрещен.
+
+        Args:
+            chat_id: ID пользователя
+
+        Returns:
+            Dict[str, Any]: Словарь с настройками
+        """
+        cache_key = f'user_delivery_settings_{chat_id}'
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Проверяем, существует ли таблица (создаем если нет)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_delivery_settings (
+                        chat_id TEXT PRIMARY KEY,
+                        allow_delivery_mode_selection INTEGER DEFAULT 0,
+                        FOREIGN KEY (chat_id) REFERENCES users (chat_id)
+                    )
+                """)
+
+                # Получаем настройки
+                cursor.execute(
+                    "SELECT allow_delivery_mode_selection FROM user_delivery_settings WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                row = cursor.fetchone()
+
+                if row:
+                    settings = {
+                        'allow_delivery_mode_selection': bool(row[0])
+                    }
+                else:
+                    # Настроек нет, создаем со значением по умолчанию - запрещено (0)
+                    cursor.execute(
+                        "INSERT INTO user_delivery_settings (chat_id, allow_delivery_mode_selection) VALUES (?, 0)",
+                        (chat_id,)
+                    )
+                    conn.commit()
+                    settings = {'allow_delivery_mode_selection': False}
+
+                self._set_in_cache(cache_key, settings)
+                return settings
+        except Exception as e:
+            logger.error(f"Ошибка при получении настроек режима доставки для {chat_id}: {e}", exc_info=True)
+            return {'allow_delivery_mode_selection': False}  # По умолчанию запрещено
+
+    def update_user_delivery_settings(self, chat_id: str, allow_delivery_mode_selection: bool) -> bool:
+        """
+        Обновляет настройки режима доставки для пользователя.
+
+        Args:
+            chat_id: ID пользователя
+            allow_delivery_mode_selection: Разрешить выбор режима доставки
+
+        Returns:
+            bool: True если успешно обновлено, иначе False
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Проверяем, существует ли таблица (создаем если нет)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_delivery_settings (
+                        chat_id TEXT PRIMARY KEY,
+                        allow_delivery_mode_selection INTEGER DEFAULT 1,
+                        FOREIGN KEY (chat_id) REFERENCES users (chat_id)
+                    )
+                """)
+
+                # Проверяем, существует ли запись для этого пользователя
+                cursor.execute(
+                    "SELECT COUNT(*) FROM user_delivery_settings WHERE chat_id = ?",
+                    (chat_id,)
+                )
+                exists = cursor.fetchone()[0] > 0
+
+                if exists:
+                    # Обновляем существующую запись
+                    cursor.execute(
+                        "UPDATE user_delivery_settings SET allow_delivery_mode_selection = ? WHERE chat_id = ?",
+                        (int(allow_delivery_mode_selection), chat_id)
+                    )
+                else:
+                    # Создаем новую запись
+                    cursor.execute(
+                        "INSERT INTO user_delivery_settings (chat_id, allow_delivery_mode_selection) VALUES (?, ?)",
+                        (chat_id, int(allow_delivery_mode_selection))
+                    )
+
+                conn.commit()
+                self._clear_cache(f'user_delivery_settings_{chat_id}')
+                return True
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении настроек режима доставки для {chat_id}: {e}", exc_info=True)
             return False
 
     def refresh_data(self):
@@ -732,6 +844,80 @@ class DatabaseManager:
             logger.error(f"Ошибка при получении статуса пользователя {chat_id}: {e}")
             return False
 
+    def check_summarization_prompt_name_exists(self, name: str, exclude_id: Optional[int] = None) -> bool:
+        """
+        Проверяет, существует ли уже шаблон с таким именем.
+
+        Args:
+            name: Имя для проверки
+            exclude_id: ID шаблона, который следует исключить из проверки
+                       (используется при редактировании существующего шаблона)
+
+        Returns:
+            bool: True если имя уже существует, False в противном случае
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                if exclude_id is not None:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM summarization_prompts WHERE name = ? AND id != ?",
+                        (name, exclude_id)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT COUNT(*) FROM summarization_prompts WHERE name = ?",
+                        (name,)
+                    )
+
+                count = cursor.fetchone()[0]
+                return count > 0
+        except Exception as e:
+            logger.error(f"Ошибка при проверке существования имени шаблона: {e}", exc_info=True)
+            return False  # В случае ошибки лучше предполагать, что имя не существует
+
+    def find_similar_prompts(self, prompt_text: str, exclude_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Находит шаблоны с похожим текстом промпта.
+
+        Args:
+            prompt_text: Текст промпта для сравнения
+            exclude_id: ID шаблона, который следует исключить из результатов
+
+        Returns:
+            List[Dict[str, Any]]: Список шаблонов с похожим текстом
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Находим точные совпадения текста промпта
+                if exclude_id is not None:
+                    cursor.execute(
+                        "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts WHERE prompt_text = ? AND id != ?",
+                        (prompt_text, exclude_id)
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts WHERE prompt_text = ?",
+                        (prompt_text,)
+                    )
+
+                similar_prompts = []
+                for row in cursor.fetchall():
+                    similar_prompts.append({
+                        'id': row[0],
+                        'name': row[1],
+                        'prompt_text': row[2],
+                        'is_default_for_new_users': bool(row[3])
+                    })
+
+                return similar_prompts
+        except Exception as e:
+            logger.error(f"Ошибка при поиске похожих промптов: {e}", exc_info=True)
+            return []
+
     def is_user_registered(self, chat_id: str) -> bool:
         """
         Проверка, зарегистрирован ли пользователь.
@@ -864,7 +1050,7 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
-                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
                 query = 'UPDATE users SET notes = ?, updated_at = ? WHERE chat_id = ?'
                 cursor.execute(query, (cleaned_notes, now, chat_id))
                 rows_affected = cursor.rowcount
@@ -916,7 +1102,7 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
-                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
 
                 # Обновлено: УБРАНО поле delivery_mode
                 query = '''
@@ -974,7 +1160,7 @@ class DatabaseManager:
                     cursor.execute('SELECT 1 FROM users WHERE chat_id = ?', (chat_id,))
                     if not cursor.fetchone():
                         # Если пользователя нет, добавляем его
-                        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        now = datetime.now().strftime('%Y-%M-%D %H:%M:%S')
                         # Используем обновленный запрос без delivery_mode
                         cursor.execute(
                             'INSERT INTO users (chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)',
@@ -1051,7 +1237,7 @@ class DatabaseManager:
                     cursor.execute('SELECT 1 FROM users WHERE chat_id = ?', (chat_id,))
                     if not cursor.fetchone():
                         # Если пользователя нет, добавляем его
-                        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
                         # Используем обновленный запрос без delivery_mode
                         cursor.execute(
                             'INSERT INTO users (chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)',
@@ -1093,7 +1279,7 @@ class DatabaseManager:
 
     def delete_subject(self, chat_id: str, subject: str) -> bool:
         """
-        Удаление темы у пользователя.
+        Удаление темы у пользователя и всех связанных с ней данных суммаризации.
 
         Args:
             chat_id: ID чата пользователя
@@ -1108,23 +1294,41 @@ class DatabaseManager:
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
 
+                # 1. Сначала удаляем настройки суммаризации для этой темы
+                cursor.execute(
+                    "DELETE FROM subject_summarization_settings WHERE chat_id = ? AND subject = ?",
+                    (chat_id, subject)
+                )
+                summarization_settings_deleted = cursor.rowcount
+
+                # 2. Затем удаляем саму тему
                 query = '''
                 DELETE FROM subjects
                 WHERE chat_id = ? AND subject = ?
                 '''
 
                 cursor.execute(query, (chat_id, subject))
+                subject_deleted = cursor.rowcount > 0
+
                 conn.commit()  # Явный коммит
 
-                success = cursor.rowcount > 0
+                success = subject_deleted
                 logger.info(
-                    f"Удаление темы '{subject}' у пользователя {chat_id}: успех: {success}, затронуто строк: {cursor.rowcount}")
+                    f"Удаление темы '{subject}' у пользователя {chat_id}: "
+                    f"успех: {success}, "
+                    f"удалено тем: {cursor.rowcount}, "
+                    f"удалено настроек суммаризации: {summarization_settings_deleted}"
+                )
 
                 if success:
                     # Очищаем соответствующие кэши
                     self._clear_cache(f"user_subjects_{chat_id}")
                     self._clear_cache("all_subjects")
                     self._clear_cache("all_client_data")
+
+                    # Очищаем кэши, связанные с суммаризацией
+                    self._clear_cache(f"subject_summarization_settings_{chat_id}_{subject}")
+                    self._clear_cache(f"subject_summarization_status_{chat_id}_{subject}")
 
                 return success
         except Exception as e:
@@ -1133,13 +1337,13 @@ class DatabaseManager:
 
     def delete_user(self, chat_id: str) -> bool:
         """
-        Удаление пользователя и всех его тем.
+        Удаление пользователя и всех связанных с ним данных.
 
         Args:
             chat_id: ID чата пользователя
 
         Returns:
-            True если пользователь удален успешно, иначе False
+            bool: True если пользователь удален успешно, иначе False
         """
         try:
             with self.get_connection() as conn:
@@ -1148,17 +1352,44 @@ class DatabaseManager:
                 cursor = conn.cursor()
 
                 try:
-                    # Сначала удаляем все темы пользователя
+                    # 1. Удаление настроек суммаризации для тем пользователя
+                    cursor.execute(
+                        "DELETE FROM subject_summarization_settings WHERE chat_id = ?",
+                        (chat_id,)
+                    )
+                    subject_summarization_deleted = cursor.rowcount
+
+                    # 2. Удаляем глобальные настройки суммаризации пользователя
+                    cursor.execute(
+                        "DELETE FROM user_summarization_settings WHERE chat_id = ?",
+                        (chat_id,)
+                    )
+                    user_summarization_deleted = cursor.rowcount
+
+                    # 3. Удаляем настройки режима доставки
+                    cursor.execute(
+                        "DELETE FROM user_delivery_settings WHERE chat_id = ?",
+                        (chat_id,)
+                    )
+                    delivery_settings_deleted = cursor.rowcount
+
+                    # 4. Удаляем темы пользователя
                     cursor.execute('DELETE FROM subjects WHERE chat_id = ?', (chat_id,))
                     subjects_deleted = cursor.rowcount
 
-                    # Затем удаляем самого пользователя
+                    # 5. Удаляем самого пользователя
                     cursor.execute('DELETE FROM users WHERE chat_id = ?', (chat_id,))
                     user_deleted = cursor.rowcount
 
-                    conn.commit()  # Явный коммит
+                    conn.commit()
+
                     logger.info(
-                        f"Удаление пользователя {chat_id}: успех: {user_deleted > 0}, удалено тем: {subjects_deleted}")
+                        f"Удаление пользователя {chat_id}: успех: {user_deleted > 0}, "
+                        f"удалено тем: {subjects_deleted}, "
+                        f"удалено настроек суммаризации тем: {subject_summarization_deleted}, "
+                        f"удалено настроек суммаризации пользователя: {user_summarization_deleted}, "
+                        f"удалено настроек режима доставки: {delivery_settings_deleted}"
+                    )
 
                     if user_deleted > 0:
                         # Очищаем соответствующие кэши
@@ -1166,12 +1397,22 @@ class DatabaseManager:
                         self._clear_cache(f"user_status_{chat_id}")
                         self._clear_cache(f"user_delivery_mode_{chat_id}")
                         self._clear_cache(f"user_subjects_{chat_id}")
+                        self._clear_cache(f"user_summarization_settings_{chat_id}")
                         self._clear_cache("all_subjects")
                         self._clear_cache("all_users")
                         self._clear_cache("all_client_data")
                         self._clear_cache("active_users_with_subjects")
+                        self._clear_cache(f"user_delivery_settings_{chat_id}")
 
-                        logger.info(f"Пользователь {chat_id} успешно удален вместе с {subjects_deleted} темами")
+                        # Очищаем кэши, связанные с суммаризацией
+                        for subject, _ in self.get_user_subjects(chat_id):
+                            self._clear_cache(f"subject_summarization_settings_{chat_id}_{subject}")
+                            self._clear_cache(f"subject_summarization_status_{chat_id}_{subject}")
+
+                        logger.info(
+                            f"Пользователь {chat_id} успешно удален вместе с {subjects_deleted} темами "
+                            f"и всеми настройками суммаризации"
+                        )
                         return True
                     else:
                         logger.warning(f"Пользователь {chat_id} не найден")
@@ -1183,6 +1424,8 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Ошибка при подключении к БД для удаления пользователя {chat_id}: {e}")
             return False
+
+
 
     def delete_all_user_subjects(self, chat_id: str) -> int:
         """
@@ -1283,4 +1526,566 @@ class DatabaseManager:
                     return [{k: row[k] for k in row.keys()}] if row else []
         except Exception as e:
             logger.error(f"Ошибка при выполнении оптимизированного запроса: {e}")
+            return []
+
+    def _initialize_summarization_tables(self) -> None:
+        """Создает таблицы для хранения настроек суммаризации."""
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Таблица шаблонов для суммаризации
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS summarization_prompts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    prompt_text TEXT NOT NULL,
+                    is_default_for_new_users BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """)
+
+                # Таблица настроек суммаризации пользователя (только глобальные права доступа)
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_summarization_settings (
+                    chat_id TEXT PRIMARY KEY,
+                    allow_summarization BOOLEAN DEFAULT FALSE
+                )
+                """)
+
+                # Таблица настроек суммаризации для конкретных тем
+                cursor.execute("""
+                CREATE TABLE IF NOT EXISTS subject_summarization_settings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    allow_summarization BOOLEAN DEFAULT TRUE,
+                    summarization_prompt_id INTEGER,
+                    send_original_with_summary BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (summarization_prompt_id) REFERENCES summarization_prompts(id) ON DELETE SET NULL,
+                    FOREIGN KEY (chat_id) REFERENCES user_summarization_settings(chat_id) ON DELETE CASCADE,
+                    UNIQUE(chat_id, subject) 
+                )
+                """)
+
+                conn.commit()
+                logger.info(
+                    "Таблицы для суммаризации 'summarization_prompts', 'user_summarization_settings' и 'subject_summarization_settings' проверены/созданы.")
+
+                # Добавляем стандартный промпт, если таблица пуста
+                try:
+                    cursor.execute("SELECT COUNT(*) FROM summarization_prompts")
+                    if cursor.fetchone()[0] == 0:
+                        default_prompt_text = getattr(settings, 'DEFAULT_SUMMARIZATION_PROMPT',
+                                                      'Summarize the following email report concisely:')
+                        cursor.execute(
+                            "INSERT INTO summarization_prompts (name, prompt_text, is_default_for_new_users) VALUES (?, ?, ?)",
+                            ("Стандартный", default_prompt_text, True)
+                        )
+                        conn.commit()
+                        logger.info("Добавлен стандартный промпт в 'summarization_prompts'.")
+                except Exception as inner_err:
+                    logger.error(f"Ошибка при добавлении стандартного промпта: {inner_err}", exc_info=True)
+
+        except Exception as e:
+            logger.error(f"Ошибка при создании таблиц для суммаризации: {e}", exc_info=True)
+
+    def get_summarization_prompt_by_id(self, prompt_id: int) -> Optional[Dict[str, Any]]:
+        """Получает текст промпта по его ID."""
+        query = "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts WHERE id = ?"
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (prompt_id,))
+                row = cursor.fetchone()
+                if row:
+                    return {"id": row[0], "name": row[1], "prompt_text": row[2], "is_default_for_new_users": bool(row[3])}
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении промпта по ID {prompt_id}: {e}", exc_info=True)
+        return None
+
+    def get_default_summarization_prompt(self) -> Optional[Dict[str, Any]]:
+        """Получает промпт, который является стандартным для новых пользователей или первый, если такого нет."""
+        query_default = "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts WHERE is_default_for_new_users = TRUE LIMIT 1"
+        query_first = "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts ORDER BY id LIMIT 1"
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query_default)
+                row = cursor.fetchone()
+                if row:
+                    return {"id": row[0], "name": row[1], "prompt_text": row[2], "is_default_for_new_users": bool(row[3])}
+                # Если нет стандартного, берем первый попавшийся
+                cursor.execute(query_first)
+                row = cursor.fetchone()
+                if row:
+                    return {"id": row[0], "name": row[1], "prompt_text": row[2], "is_default_for_new_users": bool(row[3])}
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении стандартного/первого промпта: {e}", exc_info=True)
+        return None
+
+    def get_user_summarization_settings(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Получает настройки суммаризации для пользователя.
+
+        Args:
+            chat_id: ID пользователя
+
+        Returns:
+            Dict[str, Any]: Словарь с настройкой allow_summarization -
+                            определяющей может ли пользователь управлять суммаризацией
+        """
+        query = """
+        SELECT allow_summarization 
+        FROM user_summarization_settings
+        WHERE chat_id = ?
+        """
+        default_settings = {
+            "allow_summarization": False,
+        }
+
+        cache_key = f"user_summarization_settings_{chat_id}"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query, (str(chat_id),))
+                row = cursor.fetchone()
+
+                if row:
+                    settings = {
+                        "allow_summarization": bool(row[0])
+                    }
+                    self._set_in_cache(cache_key, settings)
+                    return settings
+                else:
+                    # Если для пользователя нет записи, создаем и возвращаем стандартные
+                    self.update_user_summarization_settings(str(chat_id), False)
+                    self._set_in_cache(cache_key, default_settings)
+                    return default_settings
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении настроек суммаризации для {chat_id}: {e}", exc_info=True)
+            return default_settings  # Возвращаем дефолт в случае ошибки
+
+    def update_user_summarization_settings(self, chat_id: str, allow_summarization: bool) -> bool:
+        """
+        Обновляет или создает настройки суммаризации для пользователя.
+
+        Args:
+            chat_id: ID пользователя
+            allow_summarization: Разрешить ли пользователю управлять суммаризацией
+
+        Returns:
+            bool: True если операция успешна, False в противном случае
+        """
+        query = """
+        INSERT INTO user_summarization_settings (chat_id, allow_summarization)
+        VALUES (?, ?)
+        ON CONFLICT(chat_id) DO UPDATE SET
+            allow_summarization = excluded.allow_summarization;
+        """
+
+        try:
+            with self.get_connection() as conn:
+                conn.execute(query, (str(chat_id), allow_summarization))
+                conn.commit()
+                self._clear_cache(f"user_summarization_settings_{chat_id}")
+                logger.info(f"Настройки суммаризации для {chat_id} обновлены/созданы.")
+                return True
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при обновлении настроек суммаризации для {chat_id}: {e}", exc_info=True)
+            return False
+
+    # --- Функции для админки (CRUD для summarization_prompts) ---
+    def create_summarization_prompt(self, name: str, prompt_text: str, is_default_for_new_users: bool = False) -> Optional[int]:
+        query = "INSERT INTO summarization_prompts (name, prompt_text, is_default_for_new_users) VALUES (?, ?, ?)"
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                # Если is_default=True, сначала снимаем флаг с других
+                if is_default_for_new_users:
+                    conn.execute("UPDATE summarization_prompts SET is_default_for_new_users = FALSE WHERE is_default_for_new_users = TRUE")
+                cursor.execute(query, (name, prompt_text, is_default_for_new_users))
+                conn.commit()
+                prompt_id = cursor.lastrowid
+                logger.info(f"Создан новый промпт '{name}' (ID: {prompt_id}).")
+                return prompt_id
+        except sqlite3.IntegrityError:
+            logger.warning(f"Промпт с именем '{name}' уже существует.")
+            return None
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при создании промпта '{name}': {e}", exc_info=True)
+            return None
+
+    def get_all_summarization_prompts(self) -> List[Dict[str, Any]]:
+        query = "SELECT id, name, prompt_text, is_default_for_new_users FROM summarization_prompts ORDER BY name"
+        prompts = []
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                for row in cursor.execute(query):
+                    prompts.append({"id": row[0], "name": row[1], "prompt_text": row[2], "is_default_for_new_users": bool(row[3])})
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении всех промптов: {e}", exc_info=True)
+        return prompts
+
+    def update_summarization_prompt(self, prompt_id: int, name: str, prompt_text: str,
+                                    is_default_for_new_users: bool) -> bool:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Проверяем, является ли текущий промт единственным установленным по умолчанию
+                cursor.execute("SELECT COUNT(*) FROM summarization_prompts WHERE is_default_for_new_users = TRUE")
+                default_count = cursor.fetchone()[0]
+
+                # Получаем текущие настройки промпта
+                cursor.execute("SELECT is_default_for_new_users FROM summarization_prompts WHERE id = ?", (prompt_id,))
+                current_setting = cursor.fetchone()
+                is_currently_default = current_setting and current_setting[0]
+
+                # Если пытаемся убрать галку с единственного шаблона по умолчанию - не позволяем
+                if is_currently_default and not is_default_for_new_users and default_count <= 1:
+                    logger.warning(
+                        f"Нельзя отключить единственный шаблон по умолчанию (ID: {prompt_id}). Должен существовать хотя бы один шаблон по умолчанию.")
+                    is_default_for_new_users = True  # Принудительно оставляем флаг включенным
+
+                # Если устанавливаем по умолчанию - снимаем этот флаг с других промптов
+                if is_default_for_new_users:
+                    conn.execute(
+                        "UPDATE summarization_prompts SET is_default_for_new_users = FALSE WHERE is_default_for_new_users = TRUE AND id != ?",
+                        (prompt_id,))
+
+                # Обновляем промпт
+                query = "UPDATE summarization_prompts SET name = ?, prompt_text = ?, is_default_for_new_users = ? WHERE id = ?"
+                conn.execute(query, (name, prompt_text, is_default_for_new_users, prompt_id))
+                conn.commit()
+
+                logger.info(f"Промпт ID {prompt_id} обновлен. Статус по умолчанию: {is_default_for_new_users}")
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при обновлении промпта ID {prompt_id}: {e}", exc_info=True)
+            return False
+
+    def update_subject_summarization_settings(self, chat_id: str, subject: str,
+                                              prompt_id: Optional[int],
+                                              send_original: bool) -> bool:
+        """
+        Обновляет детальные настройки суммаризации для конкретной темы пользователя.
+
+        Args:
+            chat_id: ID пользователя
+            subject: Тема письма
+            prompt_id: ID шаблона суммаризации (None = использовать шаблон по умолчанию)
+            send_original: Отправлять ли оригинальный текст вместе с саммари
+
+        Returns:
+            bool: True если операция успешна, False в противном случае
+        """
+        try:
+            with self.get_connection() as conn:
+                # Проверяем существование записи
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM subject_summarization_settings WHERE chat_id = ? AND subject = ?",
+                    (chat_id, subject)
+                )
+                exists = cursor.fetchone()[0] > 0
+
+                if exists:
+                    # Обновляем существующую запись
+                    cursor.execute(
+                        """UPDATE subject_summarization_settings 
+                           SET summarization_prompt_id = ?, send_original_with_summary = ?,
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE chat_id = ? AND subject = ?""",
+                        (prompt_id, int(send_original), chat_id, subject)
+                    )
+                else:
+                    # Создаем новую запись
+                    cursor.execute(
+                        """INSERT INTO subject_summarization_settings 
+                           (chat_id, subject, summarization_prompt_id, send_original_with_summary)
+                           VALUES (?, ?, ?, ?)""",
+                        (chat_id, subject, prompt_id, int(send_original))
+                    )
+
+                conn.commit()
+                self._clear_cache(f'subject_summarization_settings_{chat_id}_{subject}')
+                return True
+
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении настроек суммаризации для темы: {e}", exc_info=True)
+            return False
+
+    def get_subject_summarization_settings(self, chat_id: str, subject: str) -> Dict[str, Any]:
+        """
+        Получает детальные настройки суммаризации для конкретной темы пользователя.
+
+        Args:
+            chat_id: ID пользователя
+            subject: Тема письма
+
+        Returns:
+            Dict[str, Any]: Словарь с настройками суммаризации для темы
+        """
+        cache_key = f'subject_summarization_settings_{chat_id}_{subject}'
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Получаем настройки темы
+                cursor.execute(
+                    """SELECT summarization_prompt_id, send_original_with_summary 
+                       FROM subject_summarization_settings 
+                       WHERE chat_id = ? AND subject = ?""",
+                    (chat_id, subject)
+                )
+                row = cursor.fetchone()
+
+                if row:
+                    settings = {
+                        'prompt_id': row[0],
+                        'send_original': bool(row[1])
+                    }
+                else:
+                    # Если специфичных настроек нет, используем значения по умолчанию
+                    settings = {
+                        'prompt_id': None,
+                        'send_original': True
+                    }
+
+                self._set_in_cache(cache_key, settings)
+                return settings
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении настроек суммаризации для темы: {e}", exc_info=True)
+            # Возвращаем дефолтные настройки в случае ошибки
+            return {
+                'prompt_id': None,
+                'send_original': True
+            }
+
+    def delete_summarization_prompt(self, prompt_id: int) -> bool:
+        query = "DELETE FROM summarization_prompts WHERE id = ?"
+        try:
+            with self.get_connection() as conn:
+                # Нельзя удалить последний промпт или стандартный, если он единственный
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM summarization_prompts")
+                count = cursor.fetchone()[0]
+                if count <= 1:
+                    logger.warning(f"Нельзя удалить последний промпт (ID: {prompt_id}).")
+                    return False
+                
+                cursor.execute("SELECT is_default_for_new_users FROM summarization_prompts WHERE id = ?", (prompt_id,))
+                is_default_prompt = cursor.fetchone()
+                if is_default_prompt and is_default_prompt[0]:
+                    cursor.execute("SELECT COUNT(*) FROM summarization_prompts WHERE is_default_for_new_users = TRUE")
+                    default_count = cursor.fetchone()[0]
+                    if default_count <= 1 and count > 1: # Если это единственный дефолтный, но есть другие - нельзя удалять
+                         logger.warning(f"Нельзя удалить единственный стандартный промпт (ID: {prompt_id}), если есть другие промпты. Сначала назначьте другой стандартным.")
+                         # Можно было бы назначить другой стандартным автоматически, но лучше пусть админ решит
+                         return False
+
+
+                conn.execute(query, (prompt_id,))
+                conn.commit()
+                # Сбросить prompt_id у пользователей, если он был удален
+                conn.execute("UPDATE user_summarization_settings SET summarization_prompt_id = NULL WHERE summarization_prompt_id = ?", (prompt_id,))
+                conn.commit()
+                logger.info(f"Промпт ID {prompt_id} удален. Связанные user_settings обновлены.")
+                return True
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при удалении промпта ID {prompt_id}: {e}", exc_info=True)
+            return False
+
+    def get_subject_summarization_status(self, chat_id: str, subject: str) -> bool:
+        """
+        Get summarization status for a specific subject for a user.
+
+        Args:
+            chat_id: The Telegram chat ID of the user
+            subject: Email subject pattern
+
+        Returns:
+            bool: True if summarization is enabled for this subject,
+                  False if disabled or if no specific setting exists
+        """
+        try:
+            # Check if there is a subject-specific setting
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                SELECT allow_summarization 
+                FROM subject_summarization_settings 
+                WHERE chat_id = ? AND subject = ?
+                """, (chat_id, subject))
+
+                result = cursor.fetchone()
+                if result is not None:
+                    # Subject-specific setting exists
+                    return bool(result[0])
+
+                # Если для темы нет настроек, всегда возвращаем False
+                # НЕ используем глобальную настройку пользователя
+                return False
+
+        except Exception as e:
+            logger.error(f"Ошибка при получении статуса суммаризации для темы '{subject}' пользователя {chat_id}: {e}",
+                         exc_info=True)
+            return False
+
+    def subject_summarization_exists(self, chat_id: str, subject: str) -> bool:
+        """
+        Проверяет, существует ли запись суммаризации для указанной темы пользователя.
+
+        Args:
+            chat_id: ID пользователя
+            subject: Тема
+
+        Returns:
+            bool: True если запись существует, False иначе
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT COUNT(*) FROM subject_summarization_settings WHERE chat_id = ? AND subject = ?",
+                    (chat_id, subject)
+                )
+                count = cursor.fetchone()[0]
+                return count > 0
+        except Exception as e:
+            logger.error(f"Ошибка при проверке существования записи суммаризации для темы: {e}", exc_info=True)
+            return False
+
+    def update_subject_summarization(self, chat_id: str, subject: str, enable: bool) -> bool:
+        """
+        Update summarization setting for a specific subject.
+        
+        Args:
+            chat_id: The Telegram chat ID of the user
+            subject: Email subject pattern
+            enable: Whether to enable summarization for this subject
+            
+        Returns:
+            bool: True if the operation was successful, False otherwise
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Check if user has global summarization settings
+                cursor.execute("""
+                SELECT 1 FROM user_summarization_settings WHERE chat_id = ?
+                """, (chat_id,))
+                
+                if cursor.fetchone() is None:
+                    # Create user settings record if it doesn't exist
+                    default_prompt = self.get_default_summarization_prompt()
+                    prompt_id = default_prompt['id'] if default_prompt else None
+                    
+                    cursor.execute("""
+                    INSERT INTO user_summarization_settings 
+                    (chat_id, allow_summarization, summarization_prompt_id, send_original_with_summary) 
+                    VALUES (?, ?, ?, ?)
+                    """, (chat_id, False, prompt_id, True))
+                
+                # Check if there's already a setting for this subject
+                cursor.execute("""
+                SELECT 1 FROM subject_summarization_settings 
+                WHERE chat_id = ? AND subject = ?
+                """, (chat_id, subject))
+                
+                if cursor.fetchone() is None:
+                    # Insert new subject-specific setting
+                    cursor.execute("""
+                    INSERT INTO subject_summarization_settings 
+                    (chat_id, subject, allow_summarization) 
+                    VALUES (?, ?, ?)
+                    """, (chat_id, subject, enable))
+                else:
+                    # Update existing setting
+                    cursor.execute("""
+                    UPDATE subject_summarization_settings 
+                    SET allow_summarization = ?, 
+                        updated_at = CURRENT_TIMESTAMP 
+                    WHERE chat_id = ? AND subject = ?
+                    """, (enable, chat_id, subject))
+                    
+                conn.commit()
+                logger.info(f"Обновлены настройки суммаризации для темы '{subject}' пользователя {chat_id}: {enable}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении настроек суммаризации для темы '{subject}' пользователя {chat_id}: {e}", 
+                        exc_info=True)
+            return False
+
+    def get_user_subjects_with_summarization(self, chat_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all subjects with their summarization settings for a user.
+        
+        Args:
+            chat_id: The Telegram chat ID of the user
+            
+        Returns:
+            List[Dict[str, Any]]: List of subjects with their summarization settings
+        """
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Get the user's default setting
+                cursor.execute("""
+                SELECT allow_summarization 
+                FROM user_summarization_settings 
+                WHERE chat_id = ?
+                """, (chat_id,))
+                
+                user_result = cursor.fetchone()
+                default_enabled = bool(user_result[0]) if user_result else False
+                
+                # Get all subjects subscribed by the user
+                subjects_data = []
+                
+                # First get all subscribed subjects
+                subscribed_subjects = self.get_user_subjects(chat_id)
+                
+                # Then get subjects with specific summarization settings
+                cursor.execute("""
+                SELECT subject, allow_summarization 
+                FROM subject_summarization_settings 
+                WHERE chat_id = ?
+                """, (chat_id,))
+                
+                subject_settings = {row['subject']: bool(row['allow_summarization']) 
+                                   for row in cursor.fetchall()}
+                
+                # Combine the data
+                for subject in subscribed_subjects:
+                    subjects_data.append({
+                        'subject': subject,
+                        'summarization_enabled': subject_settings.get(subject, default_enabled),
+                        'has_custom_setting': subject in subject_settings
+                    })
+                
+                return subjects_data
+                
+        except Exception as e:
+            logger.error(f"Ошибка при получении тем с настройками суммаризации для пользователя {chat_id}: {e}", 
+                       exc_info=True)
             return []

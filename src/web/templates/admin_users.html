@@ -3,76 +3,151 @@
 {% block title %}Администраторы | DEERAY TG BOT{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <h1>Администраторы системы</h1>
-    <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
-        <span>◀</span> На главную
-    </a>
-</div>
-
-<div class="user-actions">
-    <a href="{{ url_for('add_admin_user') }}" class="btn btn-primary">Добавить администратора</a>
-    <a href="{{ url_for('activity_log') }}" class="btn btn-neutral">Журнал активности</a>
-</div>
-
-<div class="panel">
-    <div class="panel-header">Список администраторов</div>
-    <div class="panel-body">
-        {# Используем тот же класс, что и для таблицы пользователей, чтобы применились адаптивные стили #}
-        <table class="users-table responsive-table">
-            <thead>
-                <tr>
-                    <th>#</th>
-                    <th>Имя пользователя</th>
-                    <th>Роль</th>
-                    <th>Последний вход</th>
-                    <th>Статус</th>
-                    <th>Действия</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for user in users %}
-                <tr>
-                    {# Добавляем data-label к каждой ячейке #}
-                    <td data-label="#">{{ user.id }}</td>
-                    <td data-label="Имя пользователя">{{ user.username }}</td>
-                    <td data-label="Роль">
-                        {% if user.role == 'admin' %}
-                        <span class="status-text active">Администратор</span>
-                        {% elif user.role == 'operator' %}
-                        <span class="status-text active" style="background-color: var(--yellow); color: #000;">Оператор</span>
-                        {% else %}
-                        <span class="status-text inactive" style="background-color: var(--neutral);">Наблюдатель</span>
-                        {% endif %}
-                    </td>
-                    <td data-label="Последний вход">{{ user.last_login or 'Нет данных' }}</td>
-                    <td data-label="Статус">
-                        <span class="status-text {% if user.is_active %}active{% else %}inactive{% endif %}">
-                            {{ 'Активен' if user.is_active else 'Отключен' }}
-                        </span>
-                    </td>
-                    <td class="actions-cell" data-label="Действия"> {# data-label и для ячейки с действиями #}
-                        <a href="{{ url_for('edit_admin_user', user_id=user.id) }}" class="btn btn-warning">Изменить</a>
-                        {# Не удаляем самого себя #}
-                        {% if user.id != session.user_id %}
-                        <form method="post" action="{{ url_for('delete_admin_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.username }}?');">
-                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                            <button type="submit" class="btn btn-danger">Удалить</button>
-                        </form>
-                        {% endif %}
-                    </td>
-                </tr>
-                {% else %}
-                <tr>
-                    <td colspan="6" class="text-center">Пользователи не найдены</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
+<div class="users-page">
+    <div class="page-header">
+        <h1>Администраторы системы</h1>
+        <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+            <span>◀</span> На главную
+        </a>
     </div>
-</div>
-{% endblock %}
 
-{% block scripts %}
-{# Если для этой страницы нужен специфичный JS, добавьте его здесь #}
+    <div class="user-actions">
+        <a href="{{ url_for('add_admin_user') }}" class="btn btn-primary">Добавить администратора</a>
+        <a href="{{ url_for('activity_log') }}" class="btn btn-neutral">Журнал активности</a>
+    </div>
+
+    <!-- Форма для серверного поиска -->
+    <div class="search-container">
+        <form method="get" action="{{ url_for('admin_users') }}" id="server-search-form">
+            <div class="search-wrapper">
+                <input type="text" name="search" class="search-input" placeholder="Поиск по имени пользователя или роли..."
+                       value="{{ search_query or '' }}">
+                <button type="submit" class="btn search-btn">Поиск</button>
+                {% if search_query %}
+                <a href="{{ url_for('admin_users') }}" class="btn clear-btn">Очистить</a>
+                {% endif %}
+            </div>
+        </form>
+    </div>
+
+    <!-- Добавляем локальные стили для правильного отображения кнопок -->
+    <style>
+        /* Фиксированная таблица для правильного распределения ширины */
+        .users-table {
+            table-layout: fixed;
+            width: 100%;
+        }
+        /* Настройка ширины столбцов */
+        .users-table th:nth-child(1) { width: 5%; }  /* ID */
+        .users-table th:nth-child(2) { width: 20%; } /* Имя пользователя */
+        .users-table th:nth-child(3) { width: 10%; } /* Роль */
+        .users-table th:nth-child(4) { width: 20%; } /* Последний вход */
+        .users-table th:nth-child(5) { width: 10%; } /* Статус */
+        .users-table th:nth-child(6) { width: 25%; } /* Действия */
+
+        /* Стили для ячеек с действиями */
+        .actions-cell {
+            display: flex;
+            gap: 15px; /* Отступ между кнопками */
+        }
+
+        /* Расширяем кнопки и выравниваем их содержимое */
+        .actions-cell .btn {
+            min-width: 130px;
+            padding-left: 15px;
+            padding-right: 15px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+    </style>
+
+    <table class="users-table responsive-table">
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Имя пользователя</th>
+                <th>Роль</th>
+                <th>Последний вход</th>
+                <th>Статус</th>
+                <th>Действия</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td data-label="ID">{{ user.id }}</td>
+                <td data-label="Имя пользователя" class="username-cell">
+                    <span class="truncate-text" title="{{ user.username }}">
+                        {{ user.username }}
+                    </span>
+                </td>
+                <td data-label="Роль">
+                    {% if user.role == 'admin' %}
+                    <span class="status-text active">Администратор</span>
+                    {% elif user.role == 'operator' %}
+                    <span class="status-text active" style="background-color: var(--yellow); color: #000;">Оператор</span>
+                    {% else %}
+                    <span class="status-text inactive" style="background-color: var(--neutral);">Наблюдатель</span>
+                    {% endif %}
+                </td>
+                <td data-label="Последний вход">{{ user.last_login or 'Нет данных' }}</td>
+                <td data-label="Статус" class="status-cell">
+                    <span class="status-text {% if user.is_active %}active{% else %}inactive{% endif %}">
+                        {{ 'Активен' if user.is_active else 'Отключен' }}
+                    </span>
+                </td>
+                <td class="actions-cell" data-label="Действия">
+                    <a href="{{ url_for('edit_admin_user', user_id=user.id) }}" class="btn btn-warning">Редактировать</a>
+                    {% if user.id != session.user_id %}
+                    <form method="post" action="{{ url_for('delete_admin_user', user_id=user.id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить пользователя {{ user.username }}?');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                        <button type="submit" class="btn btn-danger">Удалить</button>
+                    </form>
+                    {% endif %}
+                </td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="6" class="text-center">На этой странице пользователи не найдены.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <!-- Сообщение об отсутствии результатов поиска -->
+    <div class="no-results-message" style="display: none; text-align: center; margin-top: 15px;">Ничего не найдено.</div>
+
+    <!-- Общее количество пользователей -->
+    <div class="users-count">Всего: {{ total_users }} администраторов</div>
+
+    <!-- Пагинация -->
+    {% if total_pages > 1 %}
+    <div class="pagination">
+        <!-- Ссылка на предыдущую страницу -->
+        {% if page > 1 %}
+        <a href="{{ url_for('admin_users', page=page-1, search=search_query) }}" class="pagination-item">«</a>
+        {% else %}
+        <span class="pagination-item disabled">«</span>
+        {% endif %}
+
+        <!-- Номера страниц с логикой отображения -->
+        {% for i in range(1, total_pages + 1) %}
+            {% if i == 1 or i == total_pages or i >= page - 2 and i <= page + 2 %}
+                {% if loop.previtem is defined and i > loop.previtem + 1 %}
+                    <span class="pagination-item ellipsis">...</span>
+                {% endif %}
+                <a href="{{ url_for('admin_users', page=i, search=search_query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+            {% endif %}
+        {% endfor %}
+
+        <!-- Ссылка на следующую страницу -->
+        {% if page < total_pages %}
+        <a href="{{ url_for('admin_users', page=page+1, search=search_query) }}" class="pagination-item">»</a>
+        {% else %}
+        <span class="pagination-item disabled">»</span>
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
 {% endblock %}

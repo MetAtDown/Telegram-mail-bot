@@ -47,6 +47,22 @@
     </div>
 
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+        <script>
+    document.addEventListener('DOMContentLoaded', function() {
+        const searchContainers = document.querySelectorAll('.search-container');
+
+        const hasServerSearch = Array.from(searchContainers).some(container => {
+            return container.querySelector('form[method="get"]') !== null;
+        });
+
+        if (!hasServerSearch && searchContainers.length > 0) {
+            // Только если функция существует
+            if (typeof setupUniversalSearch === 'function') {
+                setupUniversalSearch();
+            }
+        }
+    });
+    </script>
     {% block extra_js %}{% endblock %}
 </body>
 </html>

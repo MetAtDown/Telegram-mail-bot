@@ -48,7 +48,7 @@ flashMessages.forEach(message => {
                 l.classList.remove('radio-active');
                 l.classList.remove('radio-inactive');
             });
-            
+
             // Устанавливаем соответствующий класс
             const input = this.querySelector('input');
             if (input) {
@@ -57,7 +57,7 @@ flashMessages.forEach(message => {
                 } else {
                     this.classList.add('radio-inactive');
                 }
-                
+
                 // Устанавливаем значение радио-кнопки
                 input.checked = true;
             }
@@ -120,7 +120,7 @@ flashMessages.forEach(message => {
     }
 
     // Инициализация универсального поиска
-    setupUniversalSearch();
+    // setupUniversalSearch();
     
 // Обработка обновления статуса бота
 const refreshStatusBtn = document.getElementById('refresh-status');

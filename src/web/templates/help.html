@@ -19,12 +19,16 @@
                 <li><strong>Главная</strong> - находится сводная информация о работе бота и навигация страницы;</li>
                 <li><strong>Пользователи</strong> - информация о зарегистрированных пользователях в боте. Через эту вкладку также осуществляется добавление новых пользователей и редактирование текущих (через кнопку Подробнее);</li>
                 <li><strong>Добавить пользователя</strong> - вкладка для быстрого добавления пользователей;</li>
-                <li><strong>Статус бота</strong> - осуществляется управление TG ботом, а также предоставляется общая информация о работе бота и его функционале;</li>
                 <li><strong>SQL - Консоль</strong> - позволяет выполнять SQL-запросы для быстрого доступа к данным. Доступность функций зависит от роли пользователя;</li>
+                {% if session.get('user_role') in ['admin', 'operator'] %}
+                <li><strong>Шаблоны суммаризации</strong> - управление шаблонами для настройки запросов к модели ИИ при генерации саммари писем;</li>
+                {% endif %}
+                {% if session.get('user_role') == 'admin' %}
+                <li><strong>Диагностика</strong> - осуществляется управление TG ботом, а также предоставляется информация о состоянии системы, процессах и базе данных;</li>
+                {% endif %}
                 <li><strong>Справка</strong> - информация об общей функциональности данного веб приложения (вы тут).</li>
                 {% if session.get('user_role') == 'admin' %}
                 <li><strong>Администраторы</strong> - управление учетными записями администраторов системы (доступно только для администраторов).</li>
-		<li><strong>Диагностика</strong> - системная информация и оптимизация БД (доступно только для администраторов).</li>
                 {% endif %}
             </ul>
         </div>
@@ -33,7 +37,7 @@
         <div class="help-section">
             <h3>1. Viewer (Читатель)</h3>
             <ul>
-                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Просмотр интерфейса и данных</li>
+                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Просмотр части интерфейса и данных</li>
                 <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Изменение пользователей/тем</li>
                 <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление ботом</li>
                 <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Выполнение SQL-запросов</li>
@@ -44,8 +48,8 @@
             <ul>
                 <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Просмотр интерфейса и данных</li>
                 <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Добавление/редактирование пользователей и тем</li>
-                <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Управление ботом (старт/стоп)</li>
                 <li><span class="status-text active" style="padding: 2px 6px; font-size: 12px;">✅</span> Выполнение SELECT-запросов</li>
+                <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление ботом</li>
                 <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Выполнение DDL/DML запросов</li>
                 <li><span class="status-text inactive" style="padding: 2px 6px; font-size: 12px;">❌</span> Управление админками</li>
             </ul>

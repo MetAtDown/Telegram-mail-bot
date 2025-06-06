@@ -2,6 +2,49 @@
 
 {% block title %}Добавить администратора | DEERAY TG BOT{% endblock %}
 
+{% block extra_css %}
+<style>
+/* Styles for custom selection buttons */
+.input-selection-group {
+    margin-bottom: 20px;
+}
+
+.selection-option {
+    display: block;
+    background-color: #333;
+    padding: 12px 15px;
+    margin-bottom: 8px;
+    border: 2px solid #4F4F4F;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.selection-option:hover {
+    border-color: #F5F5F5;
+}
+
+.selection-option.selected {
+    background-color: rgba(105, 255, 180, 0.2);
+    border-color: #69FFB4;
+    color: white;
+}
+
+.selection-option.selected-inactive {
+    background-color: rgba(255, 71, 71, 0.2);
+    border-color: #FF4747;
+    color: white;
+}
+
+.selection-option input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="page-header">
     <h1>Добавить администратора</h1>
@@ -15,42 +58,89 @@
     <div class="panel-body">
         <form method="post" action="{{ url_for('add_admin_user') }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            
+
             <div class="form-group">
                 <label class="form-label">Имя пользователя</label>
                 <input type="text" name="username" class="form-control" placeholder="Введите имя пользователя" required>
                 <div class="hint-text">Используется для входа в систему</div>
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Пароль</label>
                 <input type="password" name="password" class="form-control" placeholder="Введите пароль" required>
                 <div class="hint-text">Используйте надежный пароль</div>
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Роль</label>
-                <div class="radio-group">
-                    <label class="radio-label">
-                        <input type="radio" name="role" value="admin" style="display: none;">
-                        <span class="radio-custom"></span>
-                        Администратор (полный доступ)
+                <div class="input-selection-group" id="role-group">
+                    <label class="selection-option">
+                        <input type="radio" name="role" value="admin">
+                        Администратор
                     </label>
-                    <label class="radio-label">
-                        <input type="radio" name="role" value="operator" checked style="display: none;">
-                        <span class="radio-custom"></span>
-                        Оператор (изменение пользователей, запуск/остановка бота)
+                    <label class="selection-option selected">
+                        <input type="radio" name="role" value="operator" checked>
+                        Оператор
                     </label>
-                    <label class="radio-label">
-                        <input type="radio" name="role" value="viewer" style="display: none;">
-                        <span class="radio-custom"></span>
-                        Наблюдатель (только просмотр)
+                    <label class="selection-option">
+                        <input type="radio" name="role" value="viewer">
+                        Наблюдатель
                     </label>
                 </div>
             </div>
-            
+
+            <div class="form-group">
+                <label class="form-label">Статус</label>
+                <div class="input-selection-group" id="status-group">
+                    <label class="selection-option selected">
+                        <input type="radio" name="is_active" value="true" checked>
+                        Активен
+                    </label>
+                    <label class="selection-option">
+                        <input type="radio" name="is_active" value="false">
+                        Отключен
+                    </label>
+                </div>
+            </div>
+
             <button type="submit" class="btn btn-primary">Добавить администратора</button>
         </form>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Custom radio button handler that doesn't interfere with main.js
+    const optionGroups = document.querySelectorAll('.input-selection-group');
+
+    optionGroups.forEach(group => {
+        const options = group.querySelectorAll('.selection-option');
+        options.forEach(option => {
+            option.addEventListener('click', function() {
+                // Find which group this belongs to
+                const isStatusGroup = this.closest('#status-group') !== null;
+
+                // Remove selection from all options in this group
+                options.forEach(opt => {
+                    opt.classList.remove('selected');
+                    opt.classList.remove('selected-inactive');
+                });
+
+                // Add appropriate class
+                if (isStatusGroup) {
+                    const isActive = this.querySelector('input').value === 'true';
+                    this.classList.add(isActive ? 'selected' : 'selected-inactive');
+                } else {
+                    this.classList.add('selected');
+                }
+
+                // Ensure the radio is checked
+                this.querySelector('input').checked = true;
+            });
+        });
+    });
+});
+</script>
 {% endblock %}

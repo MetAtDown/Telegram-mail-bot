@@ -2,6 +2,50 @@
 
 {% block title %}Редактирование администратора | DEERAY TG BOT{% endblock %}
 
+{% block extra_css %}
+<style>
+/* Fix for radio buttons */
+.input-selection-group {
+    margin-bottom: 20px;
+}
+
+.selection-option {
+    display: block;
+    background-color: #333;
+    padding: 12px 15px;
+    margin-bottom: 8px;
+    border: 2px solid #4F4F4F;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.selection-option:hover {
+    border-color: #F5F5F5;
+}
+
+.selection-option.selected {
+    background-color: #2f5572;
+    border-color: #69FFB4;
+    background-color: rgba(105, 255, 180, 0.2);
+    color: white;
+}
+
+.selection-option.selected-inactive {
+    background-color: rgba(255, 71, 71, 0.2);
+    border-color: #FF4747;
+    color: white;
+}
+
+.selection-option input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+</style>
+{% endblock %}
+
 {% block content %}
 <div class="page-header">
     <h1>Редактирование администратора</h1>
@@ -15,57 +59,88 @@
     <div class="panel-body">
         <form method="post" action="{{ url_for('edit_admin_user', user_id=user.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            
+
             <div class="form-group">
                 <label class="form-label">Имя пользователя</label>
                 <input type="text" name="username" class="form-control" value="{{ user.username }}" required>
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Новый пароль</label>
                 <input type="password" name="password" class="form-control" placeholder="Оставьте пустым, чтобы не менять">
                 <div class="hint-text">Заполните только если хотите изменить пароль</div>
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Роль</label>
-                <div class="radio-group">
-                    <label class="radio-label {% if user.role == 'admin' %}radio-active{% endif %}">
-                        <input type="radio" name="role" value="admin" {% if user.role == 'admin' %}checked{% endif %} style="display: none;">
-                        <span class="radio-custom"></span>
-                        Администратор (полный доступ)
+                <div class="input-selection-group" id="role-group">
+                    <label class="selection-option {% if user.role == 'admin' %}selected{% endif %}">
+                        <input type="radio" name="role" value="admin" {% if user.role == 'admin' %}checked{% endif %}>
+                        Администратор
                     </label>
-                    <label class="radio-label {% if user.role == 'operator' %}radio-active{% endif %}">
-                        <input type="radio" name="role" value="operator" {% if user.role == 'operator' %}checked{% endif %} style="display: none;">
-                        <span class="radio-custom"></span>
-                        Оператор (изменение пользователей, запуск/остановка бота)
+                    <label class="selection-option {% if user.role == 'operator' %}selected{% endif %}">
+                        <input type="radio" name="role" value="operator" {% if user.role == 'operator' %}checked{% endif %}>
+                        Оператор
                     </label>
-                    <label class="radio-label {% if user.role == 'viewer' %}radio-active{% endif %}">
-                        <input type="radio" name="role" value="viewer" {% if user.role == 'viewer' %}checked{% endif %} style="display: none;">
-                        <span class="radio-custom"></span>
-                        Наблюдатель (только просмотр)
+                    <label class="selection-option {% if user.role == 'viewer' %}selected{% endif %}">
+                        <input type="radio" name="role" value="viewer" {% if user.role == 'viewer' %}checked{% endif %}>
+                        Наблюдатель
                     </label>
                 </div>
             </div>
-            
+
             <div class="form-group">
                 <label class="form-label">Статус</label>
-                <div class="radio-group">
-                    <label class="radio-label {% if user.is_active %}radio-active{% endif %}">
-                        <input type="radio" name="is_active" value="true" {% if user.is_active %}checked{% endif %} style="display: none;">
-                        <span class="radio-custom"></span>
+                <div class="input-selection-group" id="status-group">
+                    <label class="selection-option {% if user.is_active %}selected{% endif %}">
+                        <input type="radio" name="is_active" value="true" {% if user.is_active %}checked{% endif %}>
                         Активен
                     </label>
-                    <label class="radio-label {% if not user.is_active %}radio-inactive{% endif %}">
-                        <input type="radio" name="is_active" value="false" {% if not user.is_active %}checked{% endif %} style="display: none;">
-                        <span class="radio-custom"></span>
+                    <label class="selection-option {% if not user.is_active %}selected-inactive{% endif %}">
+                        <input type="radio" name="is_active" value="false" {% if not user.is_active %}checked{% endif %}>
                         Отключен
                     </label>
                 </div>
             </div>
-            
+
             <button type="submit" class="btn btn-warning">Сохранить изменения</button>
         </form>
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    // Custom radio button handler that doesn't interfere with main.js
+    const optionGroups = document.querySelectorAll('.input-selection-group');
+
+    optionGroups.forEach(group => {
+        const options = group.querySelectorAll('.selection-option');
+        options.forEach(option => {
+            option.addEventListener('click', function() {
+                // Find which group this belongs to
+                const isStatusGroup = this.closest('#status-group') !== null;
+
+                // Remove selection from all options in this group
+                options.forEach(opt => {
+                    opt.classList.remove('selected');
+                    opt.classList.remove('selected-inactive');
+                });
+
+                // Add appropriate class
+                if (isStatusGroup) {
+                    const isActive = this.querySelector('input').value === 'true';
+                    this.classList.add(isActive ? 'selected' : 'selected-inactive');
+                } else {
+                    this.classList.add('selected');
+                }
+
+                // Ensure the radio is checked
+                this.querySelector('input').checked = true;
+            });
+        });
+    });
+});
+</script>
 {% endblock %}

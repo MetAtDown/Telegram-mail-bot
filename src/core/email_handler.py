@@ -9,19 +9,18 @@ import tempfile
 import os
 import threading
 import queue
-import heapq # Добавлен для планировщика
-import shutil # Добавлен для надежной очистки
+import heapq
+import shutil
 from functools import lru_cache
-from typing import Dict, List, Tuple, Any, Optional, Set
+from typing import Dict, List, Tuple, Any, Optional
 from email.header import decode_header
 from bs4 import BeautifulSoup, NavigableString, Tag
 import html
 import datetime
-from collections import defaultdict
-from contextlib import contextmanager # Добавлен для контекстного менеджера
 from weasyprint import HTML as WeasyHTML
 from src.config import settings
 from src.utils.logger import get_logger
+from src.core.summarization import SummarizationManager
 
 # Настройка логирования
 logger = get_logger("email_bot")
@@ -393,7 +392,7 @@ class EmailTelegramForwarder:
             total_msgs = len(msg_ids)
 
             # Ограничиваем количество писем для обработки за один раз
-            if total_msgs > MAX_BATCH_SIZE:
+            if (total_msgs > MAX_BATCH_SIZE):
                 logger.info(
                     f"Найдено {total_msgs} непрочитанных писем, ограничиваем до {MAX_BATCH_SIZE} для текущей обработки")
                 # Берем самые *новые* непрочитанные письма
@@ -912,9 +911,6 @@ class EmailTelegramForwarder:
             # Сначала проверяем точное совпадение (быстрее)
             if pattern_lower == email_subject_lower:
                 is_match = True
-            # Затем проверяем вхождение подстроки (медленнее)
-            elif pattern_lower in email_subject_lower:
-                is_match = True
 
             if is_match:
                 # patterns_data - это список словарей {'pattern':..., 'chat_id':..., 'enabled':True, 'delivery_mode':...}
@@ -1003,7 +999,7 @@ class EmailTelegramForwarder:
                 return False
 
             # Добавляем новую метку времени
-            if chat_id not in self._message_timestamps:
+            if not chat_id in self._message_timestamps:
                 self._message_timestamps[chat_id] = []
             self._message_timestamps[chat_id].append(current_time)
 
@@ -1055,9 +1051,10 @@ class EmailTelegramForwarder:
 
     def _send_to_telegram_now(self, chat_id: str, email_data: Dict[str, Any], delivery_mode: str) -> bool:
         """
-        (Финальная версия PDF v2 + Авто-ширина + Улучшенный шрифт + Режим на уровне подписки)
+        (Финальная версия PDF v2 + Авто-ширина + Улучшенный шрифт + Режим на уровне подписки + Суммаризация)
         Непосредственная отправка данных письма в Telegram (Текст/HTML/PDF).
         Режим доставки ('text', 'html', 'smart', 'pdf') передается как аргумент.
+        Может включать суммаризацию содержимого.
         НЕ проверяет rate limit.
         """
         # --- КОНСТАНТЫ РЕЖИМОВ ---
@@ -1065,13 +1062,58 @@ class EmailTelegramForwarder:
         logger.debug(f"Начало отправки (_send_to_telegram_now) для {chat_id}, режим: {delivery_mode}")
 
         try:
-            # --- 1. Получение режима доставки (УЖЕ ПЕРЕДАН КАК АРГУМЕНТ) ---
             # Проверяем валидность переданного режима на всякий случай
             if delivery_mode not in ALLOWED_DELIVERY_MODES:
                 logger.error(
                     f"Получен неверный режим доставки '{delivery_mode}' для {chat_id}. Используется '{DEFAULT_DELIVERY_MODE}'.")
                 delivery_mode = DEFAULT_DELIVERY_MODE
             user_delivery_mode = delivery_mode  # Используем переданное значение
+
+            # --- ОБРАБОТКА СУММАРИЗАЦИИ ---
+            # Проверяем, есть ли суммаризация в email_data
+            has_summary = 'summary' in email_data and email_data['summary']
+            send_original = email_data.get('send_original', True) if has_summary else True
+            
+            if has_summary:
+                logger.info(f"Отправка суммаризации для чата {chat_id}")
+                
+                # Отправляем заголовок и суммаризацию
+                summary_header = f"📋 <b>СУММАРИЗАЦИЯ</b> 📋\n\n"
+                summary_text = f"{summary_header}{email_data['summary']}"
+                
+                # Форматируем текст суммаризации
+                if len(summary_text) > TELEGRAM_MAX_LEN:
+                    summary_parts = self.split_text(summary_text, TELEGRAM_MAX_LEN)
+                    for part in summary_parts:
+                        self._send_telegram_message_with_retry(
+                            self.bot.send_message, chat_id, part, parse_mode='HTML'
+                        )
+                        time.sleep(0.5)  # Небольшая пауза между сообщениями
+                else:
+                    self._send_telegram_message_with_retry(
+                        self.bot.send_message, chat_id, summary_text, parse_mode='HTML'
+                    )
+                
+                # Если не нужно отправлять оригинал, завершаем отправку
+                if not send_original:
+                    # Отправляем вложения, если есть
+                    if email_data.get("attachments"):
+                        logger.info(f"Отправка только вложений после суммаризации для {chat_id}")
+                        for attachment in email_data["attachments"]:
+                            self.send_attachment_to_telegram(chat_id, attachment)
+                            time.sleep(0.5)
+                    
+                    # Сообщаем об успехе
+                    logger.info(f"Письмо успешно отправлено с суммаризацией (без оригинала) для {chat_id}")
+                    return True
+                
+                # Отправляем разделитель между суммаризацией и оригиналом
+                separator = "\n\n" + "=" * 30 + "\n\n<b>ОРИГИНАЛЬНОЕ ПИСЬМО</b>\n\n"
+                self._send_telegram_message_with_retry(
+                    self.bot.send_message, chat_id, separator, parse_mode='HTML'
+                )
+            
+            # --- ПРОДОЛЖАЕМ СТАНДАРТНУЮ ОБРАБОТКУ ДЛЯ ОРИГИНАЛА ---
 
             # --- 2. Подготовка контента ---
             body = email_data.get("body", "")
@@ -1830,14 +1872,13 @@ class EmailTelegramForwarder:
                 with open(temp_file_path, 'rb') as file_to_send:
                      # Устанавливаем parse_mode='MarkdownV2' для caption
                      # visible_file_name нужен только для send_document
-                     send_kwargs = {
-                         'caption': caption,
-                         'parse_mode': 'MarkdownV2' # Здесь нужен parse_mode для заголовка в caption
-                     }
-                     # Для send_document нужно добавить visible_file_name
                      # Для других методов (photo, video, audio) этот параметр не нужен или вызовет ошибку
                      if send_method == self.bot.send_document:
-                         send_kwargs['visible_file_name'] = safe_filename
+                         send_kwargs = {
+                             "caption": caption,
+                             "parse_mode": "MarkdownV2",
+                             "visible_file_name": safe_filename
+                         }
 
                      self._send_telegram_message_with_retry(
                           send_method,
@@ -2009,7 +2050,6 @@ class EmailTelegramForwarder:
 
     def get_email_subject(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> Optional[str]:
         """ Получить только заголовок письма. """
-        # ... (без изменений) ...
         try:
             # Получаем только заголовок письма
             logger.debug(f"Извлечение заголовка для письма {msg_id.decode()}...")
@@ -2044,11 +2084,15 @@ class EmailTelegramForwarder:
              return None
         except Exception as e:
             logger.error(f"Непредвиденная ошибка при извлечении заголовка письма {msg_id.decode()}: {e}", exc_info=True)
-            return None
-
+            return None    
+        
     def _process_email_worker(self) -> None:
         """ Рабочий поток для обработки писем из очереди (отправка в Telegram). """
         logger.info("Запущен рабочий поток обработки очереди email...")
+        
+        # Инициализация менеджера суммаризации
+        summarization_manager = SummarizationManager()
+        
         while not self.stop_event.is_set():
             try:
                 try:
@@ -2077,12 +2121,48 @@ class EmailTelegramForwarder:
                         logger.warning(
                             f"Некорректные данные подписки в очереди для письма '{email_subject}': {subscription_info}")
                         continue
+                    
+                    # Проверка, нужно ли суммаризировать письмо
+                    text_for_summary = None
+                    if email_data.get('body'):
+                        # Получаем текстовое содержимое письма для проверки
+                        text_for_summary = self.format_email_body(
+                            email_data.get('body', ''), 
+                            email_data.get('content_type', 'text/plain')
+                        )
+                        
+                        # Проверяем возможность и необходимость суммаризации
+                        if text_for_summary and len(text_for_summary) >= 200:
+                            # Проверяем настройки суммаризации для этого отчета и пользователя
+                            try:
+                                # Проверяем, включена ли суммаризация для этого отчета
+                                subject_summarization_enabled = self.db_manager.get_subject_summarization_status(chat_id, pattern)
+                                
+                                if subject_summarization_enabled:
+                                    # Суммаризируем содержимое
+                                    subject = email_data.get('subject', '')
+                                    summary_result = summarization_manager.summarize_text(chat_id, subject, text_for_summary)
+                                    
+                                    if summary_result:
+                                        # Создаем копию email_data для этого конкретного получателя,
+                                        # чтобы не затрагивать данные для других получателей
+                                        user_email_data = email_data.copy()
+                                        # Добавляем суммаризацию к данным письма
+                                        user_email_data['summary'] = summary_result['summary']
+                                        user_email_data['send_original'] = summary_result['send_original']
+                                        logger.info(f"Суммаризация создана для письма '{email_subject}' пользователя {chat_id}")
+                                        
+                                        # Используем копию данных с суммаризацией для этого пользователя
+                                        logger.info(f"Запуск отправки суммаризованного письма '{email_subject}' для чата {chat_id}")
+                                        self.send_to_telegram(chat_id, user_email_data, delivery_mode)
+                                        continue  # Переходим к следующей подписке
+                            except Exception as e:
+                                logger.error(f"Ошибка при суммаризации письма '{email_subject}' для {chat_id}: {e}", exc_info=True)
 
                     logger.info(
                         f"Запуск отправки письма '{email_subject}' для чата {chat_id} (шаблон: '{pattern}', режим: {delivery_mode})")
                     # Вызываем send_to_telegram, передавая ему режим доставки для этой подписки
                     self.send_to_telegram(chat_id, email_data, delivery_mode)
-                    # processed_chat_ids больше не нужен здесь, т.к. check_subject_match уже сделал дедупликацию
 
                 # Отмечаем задачу как выполненную (один раз для всего письма)
                 self.email_queue.task_done()
@@ -2097,7 +2177,6 @@ class EmailTelegramForwarder:
 
     def _start_workers(self) -> None:
         """ Запуск рабочих потоков для обработки писем из очереди. """
-        # ... (без изменений) ...
         if self.workers: # Если потоки уже есть, не запускаем новые
             logger.debug("Рабочие потоки обработки email уже запущены.")
             return
@@ -2335,9 +2414,7 @@ class EmailTelegramForwarder:
 
     def start_scheduler(self, interval: int = 5) -> None:
         """ Запуск планировщика для регулярной проверки почты. """
-        # ... (без изменений, но добавим запуск/остановку нового планировщика) ...
 
-        # Настройка расписания основной проверки почты
         self.check_interval = interval
         schedule.clear() # Очищаем предыдущие задачи на всякий случай
         schedule.every(interval).minutes.do(self.process_emails)

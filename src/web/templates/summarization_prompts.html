@@ -1,0 +1,147 @@
+{% extends 'base.html' %}
+
+{% block title %}Шаблоны суммаризации | DEERAY TG BOT{% endblock %}
+
+{% block content %}
+<div class="page-header">
+    <h1>Шаблоны суммаризации</h1>
+    <a href="{{ url_for('index') }}" class="btn btn-neutral back-btn">
+        <span>◀</span> На главную
+    </a>
+</div>
+
+<div class="panel">
+    <div class="panel-header">
+        Управление шаблонами суммаризации
+    </div>
+    <div class="panel-body">
+        <div class="user-controls">
+            <a href="{{ url_for('add_summarization_prompt') }}" class="btn btn-primary">Создать новый шаблон</a>
+        </div>
+        
+        <!-- Форма для серверного поиска -->
+        <div class="search-container">
+            <form method="get" action="{{ url_for('summarization_prompts') }}" id="server-search-form">
+                <div class="search-wrapper">
+                    <input type="text" name="search" class="search-input" placeholder="Поиск по названию или тексту шаблона..."
+                           value="{{ search_query or '' }}">
+                    <button type="submit" class="btn search-btn">Поиск</button>
+                    {% if search_query %}
+                    <a href="{{ url_for('summarization_prompts') }}" class="btn clear-btn">Очистить</a>
+                    {% endif %}
+                </div>
+            </form>
+        </div>
+
+        <div class="hint-text mb-3">
+            <p>Шаблоны суммаризации используются для настройки запросов к модели ИИ при генерации саммари писем.</p>
+            <p>Каждому отчету можно назначить определенный шаблон в его настройках.</p>
+        </div>
+
+        {% if prompts %}
+        <!-- Локальные стили для ограничения ширины столбцов -->
+        <style>
+            .table-prompts {
+                table-layout: fixed;
+                width: 100%;
+            }
+            .table-prompts th:nth-child(1) { width: 5%; }
+            .table-prompts th:nth-child(2) { width: 15%; }
+            .table-prompts th:nth-child(3) { width: 45%; }
+            .table-prompts th:nth-child(4) { width: 15%; }
+            .table-prompts th:nth-child(5) { width: 20%; }
+
+            .prompt-text-cell {
+                max-width: 0;
+                overflow: hidden;
+            }
+
+            .prompt-text-cell span {
+                display: block;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+                max-width: 100%;
+            }
+        </style>
+
+        <table class="table table-prompts">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>Название</th>
+                    <th>Текст шаблона</th>
+                    <th>Статус</th>
+                    <th>Действия</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for prompt in prompts %}
+                <tr>
+                    <td>{{ loop.index }}</td>
+                    <td>{{ prompt.name }}</td>
+                    <td class="prompt-text-cell">
+                        <span title="{{ prompt.prompt_text }}">{{ prompt.prompt_text }}</span>
+                    </td>
+                    <td>
+                        {% if prompt.is_default_for_new_users %}
+                            <span class="status-text active">По умолчанию</span>
+                        {% else %}
+                            <span class="status-text inactive">Обычный</span>
+                        {% endif %}
+                    </td>
+                    <td class="actions-cell">
+                        <a href="{{ url_for('edit_summarization_prompt', prompt_id=prompt.id) }}" class="btn btn-warning">Редактировать</a>
+                        {% if not prompt.is_default_for_new_users and prompts|length > 1 %}
+                        <form method="post" action="{{ url_for('delete_summarization_prompt', prompt_id=prompt.id) }}" style="display:inline;" onsubmit="return confirm('Вы уверены, что хотите удалить этот шаблон суммаризации?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button type="submit" class="btn btn-danger">Удалить</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <!-- Информация о количестве шаблонов -->
+        <div class="users-count">Всего: {{ total_prompts }} шаблонов</div>
+
+        <!-- Пагинация -->
+        {% if total_pages > 1 %}
+        <div class="pagination">
+            {% if page > 1 %}
+            <a href="{{ url_for('summarization_prompts', page=page-1, search=search_query) }}" class="pagination-item">«</a>
+            {% else %}
+            <span class="pagination-item disabled">«</span>
+            {% endif %}
+
+            {% for i in range(1, total_pages + 1) %}
+                {% if i == 1 or i == total_pages or i >= page - 2 and i <= page + 2 %}
+                    {% if loop.previtem is defined and i > loop.previtem + 1 %}
+                        <span class="pagination-item ellipsis">...</span>
+                    {% endif %}
+                    <a href="{{ url_for('summarization_prompts', page=i, search=search_query) }}" class="pagination-item {% if i == page %}pagination-active{% endif %}">{{ i }}</a>
+                {% endif %}
+            {% endfor %}
+
+            {% if page < total_pages %}
+            <a href="{{ url_for('summarization_prompts', page=page+1, search=search_query) }}" class="pagination-item">»</a>
+            {% else %}
+            <span class="pagination-item disabled">»</span>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {% else %}
+        <div class="alert alert-warning">
+            {% if search_query %}
+            По вашему запросу не найдено шаблонов суммаризации.
+            {% else %}
+            Шаблоны суммаризации не найдены. Создайте хотя бы один шаблон.
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

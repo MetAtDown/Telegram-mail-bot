@@ -26,6 +26,15 @@ EMAIL_SERVER = os.getenv('EMAIL_SERVER', 'imap.yandex.ru')
 # Настройки Telegram
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 
+# Настройки LLM (Яндекс AI)
+LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'yandex_ai')
+YANDEX_FOLDER_ID = os.getenv('YANDEX_FOLDER_ID')
+YANDEX_OAUTH_TOKEN = os.getenv('YANDEX_OAUTH_TOKEN')
+YANDEX_AI_BASE_URL = os.getenv('YANDEX_AI_BASE_URL', 'https://llm.api.cloud.yandex.net/foundationModels/v1')
+YANDEX_AI_MODEL = os.getenv('YANDEX_AI_MODEL', 'yandexgpt-lite')
+DEFAULT_SUMMARIZATION_PROMPT = os.getenv('DEFAULT_SUMMARIZATION_PROMPT', 'Summarize the following email report concisely, highlighting key information and action items:')
+
+
 # Настройки веб-администрирования
 ADMIN_USERNAME = os.getenv('ADMIN_USERNAME', 'admin')
 ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
