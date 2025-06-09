@@ -194,7 +194,7 @@ class EmailTelegramForwarder:
         else:
             self.db_manager = db_manager
 
-        self.bot = telebot.TeleBot(self.telegram_token, threaded=True)
+        self.bot = telebot.TeleBot(self.telegram_token, threaded=False)
         self.client_data = {}
         self.user_states = {}
         self.email_queue = queue.Queue()

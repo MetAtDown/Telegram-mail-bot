@@ -1046,7 +1046,7 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
-                now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 query = 'UPDATE users SET notes = ?, updated_at = ? WHERE chat_id = ?'
                 cursor.execute(query, (cleaned_notes, now, chat_id))
                 rows_affected = cursor.rowcount
@@ -1098,7 +1098,7 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 conn.execute('BEGIN IMMEDIATE')
                 cursor = conn.cursor()
-                now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
+                now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
                 # Обновлено: УБРАНО поле delivery_mode
                 query = '''
@@ -1152,7 +1152,7 @@ class DatabaseManager:
                     cursor.execute('SELECT 1 FROM users WHERE chat_id = ?', (chat_id,))
                     if not cursor.fetchone():
                         # Если пользователя нет, добавляем его
-                        now = datetime.now().strftime('%Y-%M-%D %H:%M:%S')
+                        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         # Используем обновленный запрос без delivery_mode
                         cursor.execute(
                             'INSERT INTO users (chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)',
@@ -1228,7 +1228,7 @@ class DatabaseManager:
                     cursor.execute('SELECT 1 FROM users WHERE chat_id = ?', (chat_id,))
                     if not cursor.fetchone():
                         # Если пользователя нет, добавляем его
-                        now = datetime.now().strftime('%Y-%м-%д %H:%М:%С')
+                        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                         # Используем обновленный запрос без delivery_mode
                         cursor.execute(
                             'INSERT INTO users (chat_id, status, created_at, updated_at) VALUES (?, ?, ?, ?)',

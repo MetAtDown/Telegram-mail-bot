@@ -107,8 +107,8 @@ class EmailBotHandler:
         try:
             bot = telebot.TeleBot(
                 self.telegram_token,
-                threaded=True,  # Рекомендуется для polling
-                num_threads=4,  # Можно настроить
+                threaded=False,
+                #num_threads=4, АХАХАХАХАХХАХАХАХАХАХАХАХ УТЕЧКА ИЗ ЗА ЭТОЙ ТЕМЫ PIZDEC КЛАУД Я ТЕБЯ НЕНАВИЖУ
                 parse_mode="Markdown"  # Режим по умолчанию для send_message, если не указан явно
             )
             logger.info("Telegram бот успешно инициализирован")
