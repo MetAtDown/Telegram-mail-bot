@@ -743,20 +743,21 @@ class EmailTelegramForwarder:
                     for cell in content_cells:
                         # Внутри каждой ячейки обрабатываем теги
                         current_cell_parts = []
+                        processed_text_nodes = set()
                         for element in cell.descendants: # Идем по всем вложенным элементам
                             if isinstance(element, NavigableString):
-                                # Просто текст - добавляем, убирая лишние пробелы по краям
-                                text = str(element).strip()
-                                if text: # Добавляем только непустой текст
-                                    current_cell_parts.append(text)
+                                # Проверка, что текстовый узел не является частью уже обработанного тега (особенно ссылки)
+                                if id(element) not in processed_text_nodes:
+                                    text = str(element).strip()
+                                    if text:  # Добавляем только непустой текст
+                                        current_cell_parts.append(text)
                             elif isinstance(element, Tag):
                                 # Обрабатываем теги
                                 if element.name == 'br':
                                     # Заменяем <br> на перенос строки
                                     # Добавляем перенос, только если предыдущий элемент не был переносом
                                     # Или если это первый элемент
-                                    if not current_cell_parts or current_cell_parts[-1] != '\n':
-                                         current_cell_parts.append('\n')
+                                    current_cell_parts.append('\n')
                                 elif element.name == 'p':
                                     # Проверяем, пустой ли тег <p>
                                     p_text = element.get_text(strip=True)
@@ -768,22 +769,26 @@ class EmailTelegramForwarder:
                                         if current_cell_parts: # Добавляем только если список не пуст
                                              current_cell_parts.append('\n\n')
                                     else:
-                                        pass # Текст из <p> добавится через NavigableString
+                                        if current_cell_parts and current_cell_parts[-1] != '\n':
+                                            current_cell_parts.append('\n')
+
 
                                 elif element.name == 'a':
                                     # Обработка ссылок: "текст (URL)"
                                     href = element.get('href', '').strip()
                                     link_text = ' '.join(element.stripped_strings)
+                                    # Пометить все текстовые узлы внутри этого тега как обработанные
+                                    for text_node in element.find_all(text=True):
+                                        processed_text_nodes.add(id(text_node))
                                     if href:
                                         if not link_text or link_text == href:
                                             current_cell_parts.append(href)
                                         else:
                                             current_cell_parts.append(f"{link_text} ({href})")
-                                        # Добавляем перенос после ссылки, чтобы она была на отдельной строке
-                                        if not current_cell_parts or current_cell_parts[-1] != '\n':
-                                            current_cell_parts.append('\n')
+                                        # Добавляем перенос после ссылки
+                                        current_cell_parts.append('\n')
                                     elif link_text:
-                                         current_cell_parts.append(link_text)
+                                        current_cell_parts.append(link_text)
                                 # Игнорируем другие теги (th, table, a и т.д., т.к. обрабатываем их контент)
 
 
@@ -793,7 +798,7 @@ class EmailTelegramForwarder:
 
                     # Объединяем текст из всех обработанных ячеек/частей
                     # Добавляем разделитель между частями, если их больше одной
-                    final_text = "\n---\n".join(part.strip() for part in processed_parts if part.strip())
+                    final_text = "\n\n".join(part.strip() for part in processed_parts if part.strip())
 
 
                 except Exception as parse_err:
@@ -1036,7 +1041,7 @@ class EmailTelegramForwarder:
                 logger.info(f"Отправка суммаризации для чата {chat_id}")
                 
                 # Отправляем заголовок и суммаризацию
-                summary_header = f"📋 <b>СУММАРИЗАЦИЯ</b> 📋\n\n"
+                summary_header = f"<b>📋 Суммаризация по теме:</b> {html.escape(email_data.get('subject', 'N/A'))}\n\n"
                 summary_text = f"{summary_header}{email_data['summary']}"
                 
                 # Форматируем текст суммаризации
@@ -1065,11 +1070,11 @@ class EmailTelegramForwarder:
                     logger.info(f"Письмо успешно отправлено с суммаризацией (без оригинала) для {chat_id}")
                     return True
                 
-                # Отправляем разделитель между суммаризацией и оригиналом
-                separator = "\n\n" + "=" * 30 + "\n\n<b>ОРИГИНАЛЬНОЕ ПИСЬМО</b>\n\n"
-                self._send_telegram_message_with_retry(
-                    self.bot.send_message, chat_id, separator, parse_mode='HTML'
-                )
+                # Отправляем разделитель между суммаризацией и оригиналом (ОН не нужен убрал)
+                #separator = "\n\n" + "=" * 30 + "\n\n<b>ОРИГИНАЛЬНОЕ ПИСЬМО</b>\n\n"
+                #self._send_telegram_message_with_retry(
+                    #self.bot.send_message, chat_id, separator, parse_mode='HTML'
+                #)
             
             # --- ПРОДОЛЖАЕМ СТАНДАРТНУЮ ОБРАБОТКУ ДЛЯ ОРИГИНАЛА ---
 
