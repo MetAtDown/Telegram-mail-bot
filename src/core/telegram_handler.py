@@ -108,7 +108,7 @@ class EmailBotHandler:
             bot = telebot.TeleBot(
                 self.telegram_token,
                 threaded=False,
-                #num_threads=4, АХАХАХАХАХХАХАХАХАХАХАХАХ УТЕЧКА ИЗ ЗА ЭТОЙ ТЕМЫ PIZDEC КЛАУД Я ТЕБЯ НЕНАВИЖУ
+                #num_threads=4, если раскомитить будет утечка памяти. Щас за потоки отвечает system.py так что норм
                 parse_mode="Markdown"  # Режим по умолчанию для send_message, если не указан явно
             )
             logger.info("Telegram бот успешно инициализирован")
