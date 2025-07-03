@@ -18,7 +18,7 @@ import concurrent.futures
 import signal
 import sys
 import psutil
-from src.db.manager import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, \
+from src.config.constants import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, \
     DELIVERY_MODE_SMART, DELIVERY_MODE_PDF
 from src.config import settings
 from src.utils.logger import get_logger

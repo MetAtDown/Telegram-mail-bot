@@ -24,7 +24,6 @@ RUN pip install --no-cache-dir -r requirements.txt gunicorn
 
 # Копируем файлы проекта
 COPY src/ ./src/
-COPY run_tools.py .
 COPY README.md .
 
 # Создаем необходимые директории

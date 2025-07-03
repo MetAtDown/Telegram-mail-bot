@@ -23,6 +23,11 @@ from weasyprint import HTML as WeasyHTML
 from src.config import settings
 from src.utils.logger import get_logger
 from src.core.summarization import SummarizationManager
+from src.utils.text import escape_markdown_v2
+from src.config.constants import (
+    DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART,
+    DELIVERY_MODE_PDF, DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES
+)
 
 # Настройка логирования
 logger = get_logger("email_bot")
@@ -33,13 +38,6 @@ RETRY_DELAY = 2  # секунды
 CONNECTION_TIMEOUT = 30  # секунды
 MAX_BATCH_SIZE = 20  # максимальное количество писем для обработки за раз
 MAX_WORKERS = 3  # количество рабочих потоков для обработки писем
-DELIVERY_MODE_TEXT = 'text'
-DELIVERY_MODE_HTML = 'html'
-DELIVERY_MODE_SMART = 'smart'
-DELIVERY_MODE_PDF = 'pdf'
-DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
-ALLOWED_DELIVERY_MODES = {DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF}
-
 
 # Контекстный менеджер для временных файлов
 class TemporaryFileManager:
@@ -216,26 +214,7 @@ class EmailTelegramForwarder:
 
         # ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА
         self.delayed_sender = DelayedSendScheduler(self, self.stop_event)
-
         self.reload_client_data()
-
-    @staticmethod
-    def escape_markdown_v2(text: str) -> str:
-        """
-        Экранирует специальные символы для режима parse_mode='MarkdownV2' Telegram.
-        (Статический метод)
-
-        Args:
-            text: Исходный текст.
-
-        Returns:
-            Текст с экранированными символами.
-        """
-        if not isinstance(text, str):
-            text = str(text)
-
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-        return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
     def reload_client_data(self) -> None:
         """
@@ -1514,16 +1493,16 @@ class EmailTelegramForwarder:
                 try:
                     # Формируем заголовок
                     header = (
-                        f"*📊 Отчет:* {self.escape_markdown_v2(email_data.get('subject', 'N/A'))}\n"
-                        f"*📅 Дата:* {self.escape_markdown_v2(email_data.get('date', 'N/A'))}\n\n"
+                        f"*📊 Отчет:* {escape_markdown_v2(email_data.get('subject', 'N/A'))}\n"
+                        f"*📅 Дата:* {escape_markdown_v2(email_data.get('date', 'N/A'))}\n\n"
                     )
                     # Экранируем отформатированное тело
-                    escaped_body = self.escape_markdown_v2(formatted_body)
+                    escaped_body = escape_markdown_v2(formatted_body)
 
                     full_message_text_with_header = header + escaped_body
                     logical_separator = "________________"  # Наш логический разделитель
-                    visible_separator_md = self.escape_markdown_v2(logical_separator)
-                    escaped_split_separator = self.escape_markdown_v2(logical_separator)
+                    visible_separator_md = escape_markdown_v2(logical_separator)
+                    escaped_split_separator = escape_markdown_v2(logical_separator)
                     logger.debug(f"Используется экранированный разделитель для split: '{escaped_split_separator}'")
                     logger.debug(f"Видимый разделитель (экранированный): '{visible_separator_md}'")
 
@@ -1892,7 +1871,7 @@ class EmailTelegramForwarder:
                         parse_mode='MarkdownV2', disable_web_page_preview=True
                     )
                     # Отправляем предупреждение об ошибке вложения (без parse_mode)
-                    failed_filename = self.escape_markdown_v2(
+                    failed_filename = escape_markdown_v2(
                         attachment.get('filename', 'N/A'))  # Экранируем имя файла для безопасности
                     self._send_telegram_message_with_retry(
                         self.bot.send_message, chat_id, f"⚠️ Не удалось отправить вложение: {failed_filename}"

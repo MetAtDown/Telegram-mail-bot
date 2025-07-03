@@ -11,6 +11,10 @@ import traceback
 from src.utils.logger import get_logger
 from src.config import settings
 from src.utils.cache_manager import is_cache_valid, invalidate_caches
+from src.config.constants import (
+    DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART,
+    DELIVERY_MODE_PDF, ALLOWED_DELIVERY_MODES, DEFAULT_DELIVERY_MODE
+)
 
 # Настройка логирования
 logger = get_logger("db_manager")
@@ -18,14 +22,6 @@ logger = get_logger("db_manager")
 # Константы для повторных попыток соединения
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 0.5  # в секундах
-
-# Константы для маски
-DELIVERY_MODE_TEXT = 'text'
-DELIVERY_MODE_HTML = 'html'
-DELIVERY_MODE_SMART = 'smart'
-DELIVERY_MODE_PDF = 'pdf'
-ALLOWED_DELIVERY_MODES = {DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART, DELIVERY_MODE_PDF}
-DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
 
 class DatabaseManager:
     _instance = None

@@ -7,9 +7,13 @@ import functools
 import gc
 from src.core.summarization import SummarizationManager
 from typing import Dict, List
-from src.core.email_handler import EmailTelegramForwarder
 from src.config import settings
 from src.utils.logger import get_logger
+from src.utils.text import escape_markdown_v2
+from src.config.constants import (
+    DELIVERY_MODE_TEXT, DELIVERY_MODE_HTML, DELIVERY_MODE_SMART,
+    DELIVERY_MODE_PDF
+)
 
 # Настройка логирования с ротацией
 logger = get_logger("telegram_bot")  # Убедитесь, что get_logger настроен на DEBUG для отладки, INFO для прода
@@ -20,12 +24,6 @@ RETRY_DELAY = 2  # секунды
 RECONNECT_DELAY = 5  # секунды
 MAX_MESSAGE_QUEUE = 100
 CACHE_REFRESH_INTERVAL = 300  # секунды (5 минут)
-DELIVERY_MODE_TEXT = 'text'
-DELIVERY_MODE_HTML = 'html'
-DELIVERY_MODE_SMART = 'smart'
-DELIVERY_MODE_PDF = 'pdf'
-DEFAULT_DELIVERY_MODE = DELIVERY_MODE_SMART
-
 
 # --- ПРЕФИКСЫ ДЛЯ КАСТОМНЫХ CALLBACK_DATA ---
 REPORT_CONFIG_PREFIX = "rcfgidx_"  # Report Config by Index
@@ -286,7 +284,7 @@ class EmailBotHandler:
                                                  "Для настройки отчетов обратитесь к администратору.")
                     return
 
-                title_part = EmailTelegramForwarder.escape_markdown_v2("📋 Ваши настроенные отчеты:")
+                title_part = escape_markdown_v2("📋 Ваши настроенные отчеты:")
                 response_text = title_part + "\n\n"
                 mode_display_map = {
                     DELIVERY_MODE_TEXT: "Текст", DELIVERY_MODE_HTML: "HTML",
@@ -301,15 +299,15 @@ class EmailBotHandler:
                     subjects_with_summary[subject] = summarization_manager.get_report_summarization_status(chat_id, subject)
 
                 for index, (subject, mode) in enumerate(subjects_with_modes):
-                    safe_subject_content = EmailTelegramForwarder.escape_markdown_v2(subject)
+                    safe_subject_content = escape_markdown_v2(subject)
                     subject_line = f"▪️ *{safe_subject_content}*"
                     mode_text_display = mode_display_map.get(mode, mode.capitalize())
-                    mode_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Режим:")
+                    mode_prefix_escaped = escape_markdown_v2("- Режим:")
                     mode_line = f"   {mode_prefix_escaped} `{mode_text_display}`"
                     
                     # Добавляем информацию о суммаризации
                     summary_status = subjects_with_summary.get(subject, False)
-                    summary_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Саммари:")
+                    summary_prefix_escaped = escape_markdown_v2("- Саммари:")
                     summary_line = f"   {summary_prefix_escaped} `{'✅' if summary_status else '❌'}`"
                     
                     response_text += f"{subject_line}\n{mode_line}\n{summary_line}\n\n"
@@ -328,7 +326,7 @@ class EmailBotHandler:
                     )
                     keyboard.add(button)
 
-                explanation_part = EmailTelegramForwarder.escape_markdown_v2(
+                explanation_part = escape_markdown_v2(
                     "Нажмите, чтобы изменить настройки конкретного отчета.")
                 response_text += explanation_part
 
@@ -456,19 +454,19 @@ class EmailBotHandler:
                 keyboard.add(button_back)
 
                 # Формируем текст сообщения
-                safe_subject_escaped = EmailTelegramForwarder.escape_markdown_v2(subject_to_configure)
+                safe_subject_escaped = escape_markdown_v2(subject_to_configure)
                 response_parts = [
-                    EmailTelegramForwarder.escape_markdown_v2("⚙️ Настройка отчета:"),
+                    escape_markdown_v2("⚙️ Настройка отчета:"),
                     f"`{safe_subject_escaped}`",
-                    "*" + EmailTelegramForwarder.escape_markdown_v2("Текущие настройки:") + "*",
-                    EmailTelegramForwarder.escape_markdown_v2(
+                    "*" + escape_markdown_v2("Текущие настройки:") + "*",
+                    escape_markdown_v2(
                         f"• Режим доставки: {mode_display_map.get(current_mode, current_mode.capitalize())}"),
-                    EmailTelegramForwarder.escape_markdown_v2(
+                    escape_markdown_v2(
                         f"• Суммаризация: {'Включена' if summary_enabled else 'Отключена'}")
                 ]
 
                 if summary_enabled:
-                    response_parts.append(EmailTelegramForwarder.escape_markdown_v2(
+                    response_parts.append(escape_markdown_v2(
                         f"• Отправка оригинала: {'Вкл' if send_original else 'Выкл'}")
                     )
 
@@ -480,7 +478,7 @@ class EmailBotHandler:
                     notes.append("⚠️ Управление суммаризацией отключено администратором.")
 
                 if notes:
-                    response_parts.append("\n" + EmailTelegramForwarder.escape_markdown_v2("\n".join(notes)))
+                    response_parts.append("\n" + escape_markdown_v2("\n".join(notes)))
 
                 response_text = "\n\n".join(response_parts)
 
@@ -595,10 +593,10 @@ class EmailBotHandler:
                     mode_text_display = mode_display_map.get(new_mode, new_mode.capitalize())
                     self.bot.answer_callback_query(call.id, f"Режим изменен на: {mode_text_display}")
 
-                    safe_subject_escaped = EmailTelegramForwarder.escape_markdown_v2(subject_to_update)
+                    safe_subject_escaped = escape_markdown_v2(subject_to_update)
                     response_text_success = (
                         f"✅ *Режим доставки для отчета:*\n`{safe_subject_escaped}`\n\n"
-                        f"*Успешно изменен на:* `{EmailTelegramForwarder.escape_markdown_v2(mode_text_display)}`")
+                        f"*Успешно изменен на:* `{escape_markdown_v2(mode_text_display)}`")
                     try:
                         self.bot.edit_message_text(
                             response_text_success, chat_id, current_message_id_mode_selection,
@@ -851,7 +849,7 @@ class EmailBotHandler:
                     return
 
                 # Формируем текст и клавиатуру в ТОЧНОСТИ как в handle_show_reports
-                title_part = EmailTelegramForwarder.escape_markdown_v2("📋 Ваши настроенные отчеты:")
+                title_part = escape_markdown_v2("📋 Ваши настроенные отчеты:")
                 response_text = title_part + "\n\n"
 
                 mode_display_map = {
@@ -871,15 +869,15 @@ class EmailBotHandler:
                                                                                                            subject)
 
                 for index, (subject, mode) in enumerate(subjects_with_modes):
-                    safe_subject_content = EmailTelegramForwarder.escape_markdown_v2(subject)
+                    safe_subject_content = escape_markdown_v2(subject)
                     subject_line = f"▪️ *{safe_subject_content}*"
                     mode_text_display = mode_display_map.get(mode, mode.capitalize())
-                    mode_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Режим:")
+                    mode_prefix_escaped = escape_markdown_v2("- Режим:")
                     mode_line = f"   {mode_prefix_escaped} `{mode_text_display}`"
 
                     # Добавляем информацию о суммаризации
                     summary_status = subjects_with_summary.get(subject, False)
-                    summary_prefix_escaped = EmailTelegramForwarder.escape_markdown_v2("- Саммари:")
+                    summary_prefix_escaped = escape_markdown_v2("- Саммари:")
                     summary_line = f"   {summary_prefix_escaped} `{'✅' if summary_status else '❌'}`"
 
                     response_text += f"{subject_line}\n{mode_line}\n{summary_line}\n\n"
@@ -894,7 +892,7 @@ class EmailBotHandler:
                     )
                     keyboard.add(button)
 
-                explanation_part = EmailTelegramForwarder.escape_markdown_v2(
+                explanation_part = escape_markdown_v2(
                     "Нажмите, чтобы изменить настройки конкретного отчета.")
                 response_text += explanation_part
 
