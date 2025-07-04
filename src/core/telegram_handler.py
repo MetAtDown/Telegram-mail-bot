@@ -6,7 +6,7 @@ import queue
 import functools
 import gc
 from src.core.summarization import SummarizationManager
-from typing import Dict, List
+from cachetools import TTLCache
 from src.config import settings
 from src.utils.logger import get_logger
 from src.utils.text import escape_markdown_v2
@@ -32,8 +32,6 @@ SUBJECT_MODE_PREFIX = "smode_"  # Subject Mode
 SUBJECT_SUMMARY_PREFIX = "ssum_"  # Включение/выключение суммаризации для отчета
 SUBJECT_ORIG_PREFIX = "sorig_"  # Настройка отправки оригинала вместе с суммаризацией
 CLOSE_REPORTS_PREFIX = "close_reports"
-
-
 
 
 def with_retry(max_attempts: int = MAX_RETRIES, delay: int = RETRY_DELAY):
@@ -83,15 +81,12 @@ class EmailBotHandler:
         self.stop_event = threading.Event()
         self.message_queue = queue.Queue(maxsize=MAX_MESSAGE_QUEUE)
 
-
         self.client_data = {}
         self.client_data_timestamp = 0
         self.user_states = {}
         self.user_states_timestamp = 0
 
-        self.message_report_context_cache: Dict[
-            int, List[tuple[str, str]]] = {}  # message_id -> list of (subject, mode)
-        self.MAX_CONTEXT_CACHE_SIZE = 50  # Максимальный размер кэша контекста
+        self.message_report_context_cache = TTLCache(maxsize=200, ttl=900)
 
         self.last_activity = {}
         self.running = False
@@ -106,7 +101,7 @@ class EmailBotHandler:
             bot = telebot.TeleBot(
                 self.telegram_token,
                 threaded=False,
-                #num_threads=4, если раскомитить будет утечка памяти. Щас за потоки отвечает system.py так что норм
+                # num_threads=4, если раскомитить будет утечка памяти. Щас за потоки отвечает system.py так что норм
                 parse_mode="Markdown"  # Режим по умолчанию для send_message, если не указан явно
             )
             logger.info("Telegram бот успешно инициализирован")
@@ -235,18 +230,6 @@ class EmailBotHandler:
                     "Произошла ошибка при получении информации о вашем статусе.\n"
                     "Пожалуйста, попробуйте позже или обратитесь к администратору.")
 
-    def _clear_old_context_cache_entries(self):
-        """Очищает старые записи из кэша контекста, если он превышает лимит."""
-        with self.lock:  # Защита доступа к кэшу
-            if len(self.message_report_context_cache) > self.MAX_CONTEXT_CACHE_SIZE:
-                num_to_remove = len(self.message_report_context_cache) - self.MAX_CONTEXT_CACHE_SIZE
-                keys_to_remove = list(self.message_report_context_cache.keys())[:num_to_remove]
-                for key in keys_to_remove:
-                    del self.message_report_context_cache[key]
-                    logger.debug(f"Удален старый контекст из кэша для message_id {key} (достигнут лимит).")
-                logger.info(
-                    f"Очищено {num_to_remove} записей из кэша контекста. Текущий размер: {len(self.message_report_context_cache)}")
-
     def register_handlers(self) -> None:
         @self.bot.message_handler(commands=['start'])
         def handle_start(message: types.Message) -> None:
@@ -290,13 +273,14 @@ class EmailBotHandler:
                     DELIVERY_MODE_TEXT: "Текст", DELIVERY_MODE_HTML: "HTML",
                     DELIVERY_MODE_PDF: "PDF", DELIVERY_MODE_SMART: "Авто (Текст/PDF)"}
                 keyboard = types.InlineKeyboardMarkup(row_width=1)
-                
+
                 # Получаем информацию о суммаризации для отчетов
                 summarization_manager = SummarizationManager()
                 subjects_with_summary = {}
-                
+
                 for subject, _ in subjects_with_modes:
-                    subjects_with_summary[subject] = summarization_manager.get_report_summarization_status(chat_id, subject)
+                    subjects_with_summary[subject] = summarization_manager.get_report_summarization_status(chat_id,
+                                                                                                           subject)
 
                 for index, (subject, mode) in enumerate(subjects_with_modes):
                     safe_subject_content = escape_markdown_v2(subject)
@@ -304,12 +288,12 @@ class EmailBotHandler:
                     mode_text_display = mode_display_map.get(mode, mode.capitalize())
                     mode_prefix_escaped = escape_markdown_v2("- Режим:")
                     mode_line = f"   {mode_prefix_escaped} `{mode_text_display}`"
-                    
+
                     # Добавляем информацию о суммаризации
                     summary_status = subjects_with_summary.get(subject, False)
                     summary_prefix_escaped = escape_markdown_v2("- Саммари:")
                     summary_line = f"   {summary_prefix_escaped} `{'✅' if summary_status else '❌'}`"
-                    
+
                     response_text += f"{subject_line}\n{mode_line}\n{summary_line}\n\n"
 
                     button_text_subject = f"{subject[:35]}{'...' if len(subject) > 35 else ''}"  # Немного короче для кнопки
@@ -346,7 +330,7 @@ class EmailBotHandler:
                         self.message_report_context_cache[sent_message.message_id] = list(subjects_with_modes)
                     logger.info(
                         f"Сообщение /reports (ID: {sent_message.message_id}) с кнопками отправлено. Контекст сохранен.")
-                    self._clear_old_context_cache_entries()  # Очистка старых записей
+                    # <-- 4. Вызов _clear_old_context_cache_entries() удален отсюда.
                 except Exception as send_ex:
                     logger.error(f"Ошибка при прямой отправке /reports для {chat_id}: {send_ex}", exc_info=True)
                     self._queue_message(chat_id, "Произошла ошибка при отображении списка отчетов.")
@@ -411,7 +395,6 @@ class EmailBotHandler:
                 subject_settings = self.db_manager.get_subject_summarization_settings(chat_id, subject_to_configure)
                 send_original = subject_settings.get('send_original', True)
 
-
                 # Получаем настройки режима доставки пользователя
                 delivery_settings = self.db_manager.get_user_delivery_settings(chat_id)
                 allow_delivery_mode_selection = delivery_settings.get('allow_delivery_mode_selection', False)
@@ -444,7 +427,6 @@ class EmailBotHandler:
                             callback_data=f"{SUBJECT_ORIG_PREFIX}{original_message_id}_{report_index}"
                         )
                         keyboard.add(button_original)
-
 
                 # Кнопка возврата к списку
                 button_back = types.InlineKeyboardButton(
@@ -634,7 +616,7 @@ class EmailBotHandler:
             """Обработчик выбора настройки режима доставки"""
             self._update_user_activity(call.message.chat.id)
             chat_id = str(call.message.chat.id)
-            
+
             try:
                 # Извлекаем параметры из callback_data
                 _, _, original_message_id, report_index = call.data.split('_')
@@ -650,26 +632,27 @@ class EmailBotHandler:
                         show_alert=True
                     )
                     return
-                
+
                 with self.lock:
                     cached_reports_list = self.message_report_context_cache.get(original_message_id)
-                    
+
                 if not cached_reports_list or report_index >= len(cached_reports_list):
-                    self.bot.answer_callback_query(call.id, "Данные устарели. Запросите /reports снова.", show_alert=True)
+                    self.bot.answer_callback_query(call.id, "Данные устарели. Запросите /reports снова.",
+                                                   show_alert=True)
                     return
-                    
+
                 subject, current_mode = cached_reports_list[report_index]
-                
+
                 # Показываем клавиатуру выбора режима доставки
                 mode_keyboard = self.get_subject_delivery_mode_keyboard(original_message_id, report_index, current_mode)
-                
+
                 self.bot.edit_message_text(
                     f"Выберите режим доставки для отчета:\n\n`{subject}`",
                     chat_id, call.message.message_id,
                     reply_markup=mode_keyboard, parse_mode='Markdown'
                 )
                 self.bot.answer_callback_query(call.id)
-                
+
             except Exception as e:
                 logger.error(f"Ошибка в handle_delivery_mode_selection: {e}", exc_info=True)
                 self.bot.answer_callback_query(call.id, "Произошла ошибка", show_alert=True)

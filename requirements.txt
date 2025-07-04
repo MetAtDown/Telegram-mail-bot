@@ -59,4 +59,5 @@ wrapt==1.17.2
 WTForms==3.2.1
 zope.event==5.0
 zope.interface==7.2
+cachetools==6.1.0
 zopfli==0.2.3.post1

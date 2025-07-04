@@ -1,9 +1,9 @@
 import time
 import imaplib
 import email
+import html
 import re
 import telebot
-import uuid
 import schedule
 import tempfile
 import os
@@ -11,17 +11,15 @@ import threading
 import queue
 import heapq
 import shutil
-from functools import lru_cache
-from typing import Dict, List, Tuple, Any, Optional
-from email.header import decode_header
-from bs4 import BeautifulSoup, NavigableString, Tag
-import html
+from typing import Dict, List, Any, Optional
+from bs4 import BeautifulSoup
 import datetime
 import email.utils
 import email.parser
 from weasyprint import HTML as WeasyHTML
 from src.config import settings
 from src.utils.logger import get_logger
+from src.utils import email_parser
 from src.core.summarization import SummarizationManager
 from src.utils.text import escape_markdown_v2
 from src.config.constants import (
@@ -210,7 +208,6 @@ class EmailTelegramForwarder:
         self._message_timestamps = {}
         self._rate_limit_lock = threading.RLock()
         self._max_messages_per_minute = 20
-        self.subject_prefixes = ["[deeray.com] ", "Re: ", "Fwd: ", "Fw: "]
 
         # ИНИЦИАЛИЗАЦИЯ ПЛАНИРОВЩИКА
         self.delayed_sender = DelayedSendScheduler(self, self.stop_event)
@@ -389,31 +386,6 @@ class EmailTelegramForwarder:
             logger.error(f"Непредвиденная ошибка при получении непрочитанных писем: {e}", exc_info=True)
             return []
 
-    @lru_cache(maxsize=128)
-    def decode_mime_header(self, header: str) -> str:
-        """ Декодирование MIME-заголовков с кэшированием. """
-        try:
-            decoded_parts = decode_header(header)
-            decoded_str = ""
-
-            for part, encoding in decoded_parts:
-                if isinstance(part, bytes):
-                    # Проверяем наличие кодировки и используем utf-8 как fallback
-                    charset = encoding if encoding else 'utf-8'
-                    try:
-                        decoded_str += part.decode(charset, errors='replace')
-                    except LookupError:  # Если кодировка неизвестна
-                        logger.warning(f"Неизвестная кодировка '{charset}', используем 'utf-8' с заменой.")
-                        decoded_str += part.decode('utf-8', errors='replace')
-                else:
-                    decoded_str += str(part)
-
-            return decoded_str
-        except Exception as e:
-            logger.error(f"Ошибка при декодировании заголовка: {e}")
-            # Возвращаем исходный заголовок в случае ошибки декодирования
-            return header if isinstance(header, str) else str(header)
-
     def extract_email_content(self, mail: imaplib.IMAP4_SSL, msg_id: bytes) -> Optional[Dict[str, Any]]:
         """ Извлечение содержимого письма по его ID. """
         try:
@@ -436,18 +408,18 @@ class EmailTelegramForwarder:
             logger.debug(f"Письмо {msg_id.decode()} успешно распарсено.")
 
             # Извлекаем тему
-            subject = self.decode_mime_header(email_message.get("Subject", "Без темы"))
-            subject = self.clean_subject(subject)
+            subject = email_parser.decode_mime_header(email_message.get("Subject", "Без темы"))
+            subject = email_parser.clean_subject(subject)
 
             # Извлекаем отправителя
-            from_header = self.decode_mime_header(email_message.get("From", "Неизвестный отправитель"))
+            from_header = email_parser.decode_mime_header(email_message.get("From", "Неизвестный отправитель"))
 
             # Извлекаем дату
-            date_header = self.decode_mime_header(email_message.get("Date", ""))
+            date_header = email_parser.decode_mime_header(email_message.get("Date", ""))
 
             # Извлекаем тело и HTML
-            body, content_type, raw_html_body = self.extract_email_body(email_message)
-            attachments = self.extract_attachments(email_message)
+            body, content_type, raw_html_body = email_parser.extract_email_body(email_message)
+            attachments = email_parser.extract_attachments(email_message)
             logger.debug(
                 f"Извлечено тело (тип: {content_type}, html: {'да' if raw_html_body else 'нет'}) и {len(attachments)} вложений для письма {msg_id.decode()}.")
 
@@ -507,354 +479,6 @@ class EmailTelegramForwarder:
                              exc_info=True)
                 # Прерываем попытки при неожиданной ошибке
                 return
-
-    def extract_email_body(self, email_message: email.message.Message) -> Tuple[str, str, Optional[str]]:
-        """ Извлечение тела письма с сохранением raw HTML. """
-        body = None
-        content_type = "text/plain"
-        html_body = None
-        plain_body = None
-        raw_html_body = None
-
-        try:
-            if email_message.is_multipart():
-                for part in email_message.walk():
-                    if part.get_content_maintype() == 'multipart' or part.get('Content-Disposition', '').startswith(
-                            'attachment'):
-                        continue
-
-                    current_content_type = part.get_content_type()
-                    charset = part.get_content_charset() or "utf-8"
-                    payload = part.get_payload(decode=True)
-
-                    if payload is None: continue  # Пропускаем части без содержимого
-
-                    # Обработка text/plain
-                    if current_content_type == "text/plain" and plain_body is None:
-                        try:
-                            plain_body = payload.decode(charset, errors="replace")
-                        except LookupError:
-                            logger.warning(f"Неизвестная кодировка '{charset}' для text/plain, используем utf-8.")
-                            plain_body = payload.decode('utf-8', errors="replace")
-                        except Exception as e_dec:
-                            logger.error(f"Ошибка декодирования text/plain: {e_dec}")
-
-                    # Обработка text/html
-                    elif current_content_type == "text/html" and html_body is None:
-                        try:
-                            html_body = payload.decode(charset, errors="replace")
-                            raw_html_body = html_body  # Сохраняем сырой HTML
-                        except LookupError:
-                            logger.warning(f"Неизвестная кодировка '{charset}' для text/html, используем utf-8.")
-                            html_body = payload.decode('utf-8', errors="replace")
-                            raw_html_body = html_body
-                        except Exception as e_dec:
-                            logger.error(f"Ошибка декодирования text/html: {e_dec}")
-
-            else:  # Если письмо не multipart
-                charset = email_message.get_content_charset() or "utf-8"
-                payload = email_message.get_payload(decode=True)
-                if payload:
-                    try:
-                        body = payload.decode(charset, errors="replace")
-                        content_type = email_message.get_content_type()
-                        if content_type == "text/html":
-                            raw_html_body = body
-                            html_body = body  # Для логики выбора ниже
-                        elif content_type == "text/plain":
-                            plain_body = body  # Для логики выбора ниже
-                    except LookupError:
-                        logger.warning(f"Неизвестная кодировка '{charset}' для non-multipart, используем utf-8.")
-                        body = payload.decode('utf-8', errors="replace")
-                        # Пытаемся определить тип еще раз
-                        content_type = email_message.get_content_type()
-                        if content_type == "text/html":
-                            raw_html_body = body; html_body = body
-                        elif content_type == "text/plain":
-                            plain_body = body
-                    except Exception as e_dec:
-                        logger.error(f"Ошибка декодирования non-multipart: {e_dec}")
-
-            # Выбираем тело письма: приоритет plain тексту, затем html, затем body (из non-multipart)
-            final_body = plain_body if plain_body is not None else html_body if html_body is not None else body
-            final_content_type = "text/plain" if plain_body is not None else "text/html" if html_body is not None else content_type
-
-            if final_body is None:
-                final_body = "⚠ Не удалось получить содержимое письма"
-                final_content_type = "text/plain"
-
-            # Убедимся, что raw_html_body существует только если был найден HTML
-            if final_content_type != "text/html":
-                raw_html_body = None
-
-            return final_body, final_content_type, raw_html_body
-
-        except Exception as e:
-            logger.error(f"Ошибка при извлечении тела письма: {e}", exc_info=True)
-            return "⚠ Ошибка обработки содержимого письма", "text/plain", None
-
-    def extract_attachments(self, email_message: email.message.Message) -> List[Dict[str, Any]]:
-        """ Извлечение вложений из письма. """
-        attachments = []
-        processed_parts = set()  # Для предотвращения дублирования из-за walk()
-
-        if not email_message.is_multipart():
-            return attachments
-
-        try:
-            for part in email_message.walk():
-                part_id = id(part)
-                if part_id in processed_parts: continue
-                processed_parts.add(part_id)
-
-                # Пропускаем составные части и сообщения, если это не основной контент
-                if part.is_multipart(): continue
-
-                # Проверяем наличие имени файла и Content-Disposition
-                filename = part.get_filename()
-                content_disposition = part.get('Content-Disposition', '')
-
-                # Более гибкая проверка на вложения
-                is_attachment = bool(filename) or ('attachment' in content_disposition)
-
-                if not is_attachment and not ('inline' in content_disposition):
-                    continue
-
-                # Если имя файла не определено, но есть disposition, попробуем извлечь имя из disposition
-                if not filename and ('attachment' in content_disposition or 'inline' in content_disposition):
-                    # Пытаемся извлечь имя из Content-Disposition
-                    filename_match = re.search(r'filename\*?=(?:(["\'])(.*?)\1|([^;\s]+))', content_disposition,
-                                               re.IGNORECASE)
-                    if filename_match:
-                        # Предпочитаем filename* (RFC 5987) если есть, иначе обычный filename
-                        encoded_name = filename_match.group(2) or filename_match.group(3)
-                        if encoded_name:
-                            if encoded_name.lower().startswith("utf-8''"):
-                                try:
-                                    filename = email.utils.unquote(encoded_name.split("''", 1)[1])
-                                except:
-                                    filename = encoded_name  # Fallback
-                            else:
-                                filename = encoded_name
-                        else:  # Fallback если имя не найдено в disposition
-                            filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
-
-                    else:  # Если имя не найдено в disposition
-                        filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
-
-                # Если все проверки пройдены, но имя файла всё равно не определено (маловероятно)
-                if not filename:
-                    filename = f"attachment_{uuid.uuid4().hex[:8]}.bin"
-
-                # Декодируем имя файла, если оно было получено из get_filename()
-                filename = self.decode_mime_header(filename)
-
-                # Получаем содержимое вложения
-                try:
-                    content = part.get_payload(decode=True)
-                except Exception as payload_err:
-                    logger.error(f"Ошибка при получении payload для '{filename}': {payload_err}")
-                    continue  # Пропускаем это вложение
-
-                # Если содержимое равно None или пустое, пропускаем
-                if content is None or len(content) == 0:
-                    logger.warning(f"Вложение '{filename}' не имеет содержимого или оно пустое, пропускаем")
-                    continue
-
-                # Получаем тип содержимого
-                content_type = part.get_content_type()
-
-                logger.info(f"Найдено вложение: {filename}, тип: {content_type}, размер: {len(content)} байт")
-
-                attachments.append({
-                    'filename': filename,
-                    'content': content,  # Храним как байты
-                    'content_type': content_type
-                })
-
-            logger.info(f"Всего найдено вложений: {len(attachments)}")
-            return attachments
-        except Exception as e:
-            logger.error(f"Ошибка при извлечении вложений: {e}", exc_info=True)
-            return []
-
-    def clean_subject(self, subject: str) -> str:
-        """ Очистка темы от префиксов. """
-        original_subject = subject
-        try:
-            # Проверяем, что subject это строка
-            if not isinstance(subject, str):
-                subject = str(subject)
-
-            subject = subject.strip()
-            cleaned = False
-
-            # Итеративно удаляем префиксы
-            while True:
-                found_prefix = False
-                for prefix in self.subject_prefixes:
-                    if subject.lower().startswith(prefix.lower()):
-                        subject = subject[len(prefix):].strip()
-                        found_prefix = True
-                        cleaned = True
-                        break  # Начинаем проверку префиксов заново с укороченной строки
-                if not found_prefix:
-                    break  # Ни один префикс не найден, выходим из цикла
-
-            return subject
-        except Exception as e:
-            logger.error(f"Ошибка при очистке темы письма ('{original_subject}'): {e}")
-            return original_subject  # Возвращаем исходную в случае ошибки
-
-    def format_email_body(self, body: str, content_type: str) -> str:
-        """
-        Форматирует тело письма (HTML -> Текст), корректно обрабатывая <br> и <p>
-        на основе известной структуры генерации HTML.
-        """
-        logger.debug(
-            f"Форматирование тела (v3). Content-Type: {content_type}. Исходная длина: {len(body)}")
-        final_text = ""
-        try:
-            # Только для HTML контента
-            if content_type == "text/html":
-                try:
-                    # Раскодирование HTML сущностей
-                    try:
-                        unescaped_body = html.unescape(body)
-                    except Exception as ue:
-                        logger.warning(f"Ошибка при html.unescape: {ue}. Используем исходный body.")
-                        unescaped_body = body
-
-                    soup = BeautifulSoup(unescaped_body, 'html.parser')
-
-                    # --- Основная логика парсинга ---
-                    # Ищем основные контейнеры - ячейки таблицы
-                    # Предполагаем, что основной контент находится в <td>
-                    content_cells = soup.find_all('td')
-                    processed_parts = []
-
-                    if not content_cells:
-                        # Если нет <td>, пробуем обработать весь body как один блок
-                        logger.warning("Не найдены теги <td>, попытка обработки всего body.")
-                        content_cells = [soup]  # Обрабатываем весь суп как один "блок"
-
-                    for cell in content_cells:
-                        # Внутри каждой ячейки обрабатываем теги
-                        current_cell_parts = []
-                        processed_text_nodes = set()
-                        for element in cell.descendants:  # Идем по всем вложенным элементам
-                            if isinstance(element, NavigableString):
-                                # Проверка, что текстовый узел не является частью уже обработанного тега (особенно ссылки)
-                                if id(element) not in processed_text_nodes:
-                                    text = str(element).strip()
-                                    if text:  # Добавляем только непустой текст
-                                        current_cell_parts.append(text)
-                            elif isinstance(element, Tag):
-                                # Обрабатываем теги
-                                if element.name == 'br':
-                                    # Заменяем <br> на перенос строки
-                                    # Добавляем перенос, только если предыдущий элемент не был переносом
-                                    # Или если это первый элемент
-                                    current_cell_parts.append('\n')
-                                elif element.name == 'p':
-                                    # Проверяем, пустой ли тег <p>
-                                    p_text = element.get_text(strip=True)
-                                    if not p_text:
-                                        # Пустой <p></p> - добавляем двойной перенос для отступа
-                                        # Убедимся, что не добавляем лишние переносы подряд
-                                        while current_cell_parts and current_cell_parts[-1] == '\n':
-                                            current_cell_parts.pop()  # Убираем предыдущие \n
-                                        if current_cell_parts:  # Добавляем только если список не пуст
-                                            current_cell_parts.append('\n\n')
-                                    else:
-                                        if current_cell_parts and current_cell_parts[-1] != '\n':
-                                            current_cell_parts.append('\n')
-
-
-                                elif element.name == 'a':
-                                    # Обработка ссылок: "текст (URL)"
-                                    href = element.get('href', '').strip()
-                                    link_text = ' '.join(element.stripped_strings)
-                                    # Пометить все текстовые узлы внутри этого тега как обработанные
-                                    for text_node in element.find_all(text=True):
-                                        processed_text_nodes.add(id(text_node))
-                                    if href:
-                                        if not link_text or link_text == href:
-                                            current_cell_parts.append(href)
-                                        else:
-                                            current_cell_parts.append(f"{link_text} ({href})")
-                                        # Добавляем перенос после ссылки
-                                        current_cell_parts.append('\n')
-                                    elif link_text:
-                                        current_cell_parts.append(link_text)
-                                # Игнорируем другие теги (th, table, a и т.д., т.к. обрабатываем их контент)
-
-                        # Собираем текст из частей ячейки
-                        cell_text = "".join(current_cell_parts)
-                        processed_parts.append(cell_text)
-
-                    # Объединяем текст из всех обработанных ячеек/частей
-                    # Добавляем разделитель между частями, если их больше одной
-                    final_text = "\n\n".join(part.strip() for part in processed_parts if part.strip())
-
-
-                except Exception as parse_err:
-                    logger.error(
-                        f"Ошибка парсинга HTML BeautifulSoup (v3): {parse_err}. Попытка вернуть исходный текст.",
-                        exc_info=True)
-                    final_text = body.strip()  # Fallback
-
-            # Если содержимое в plain text
-            elif content_type == "text/plain":
-                final_text = body.strip()
-            else:
-                logger.warning(f"Обработка неизвестного content_type: {content_type}. Используем исходный текст.")
-                final_text = body.strip()
-
-            # --- Логика удаления "Explore in Superset" ---
-            # Применяем к уже полученному final_text
-            lines = final_text.splitlines()
-            filtered_lines = []
-            skip_next_line = False
-            explore_removed = False
-
-            for line in lines:
-                line_stripped = line.strip()
-
-                if skip_next_line:
-                    skip_next_line = False
-                    # logger.debug(f"Пропущена строка после 'Explore in Superset': '{line_stripped[:100]}...'")
-                    continue
-
-                if line_stripped == "Explore in Superset":
-                    skip_next_line = True
-                    explore_removed = True
-                    # logger.debug("Найдена строка 'Explore in Superset', будет удалена вместе со следующей.")
-                    continue
-
-                filtered_lines.append(line)
-
-            if explore_removed:
-                logger.debug("Удалена строка 'Explore in Superset' и следующая за ней (если была).")
-
-            # Собираем текст обратно после фильтрации Superset
-            final_text = "\n".join(filtered_lines)
-
-            # --- Финальная очистка переносов ---
-            # Сжимаем 3 и более переносов до 2
-            final_text = re.sub(r'\n{3,}', '\n\n', final_text)
-            # Убираем пробелы/табы в КОНЦЕ строк
-            final_text = "\n".join([line.rstrip() for line in final_text.splitlines()])
-            # Убираем пустые строки в начале/конце
-            final_text = final_text.strip()
-
-            logger.debug(f"Тело отформатировано (v3 - descendants). Итоговая длина: {len(final_text)}")
-            return final_text
-
-        except Exception as e:
-            logger.error(f"Критическая ошибка в format_email_body (v3): {e}", exc_info=True)
-            truncated_body = body[:1000] + "..." if body and len(body) > 1000 else body if body else ""
-            return f"⚠️ Ошибка обработки содержимого письма (см. логи).\n\n{truncated_body}"
 
     def check_subject_match(self, email_subject: str) -> List[Dict[str, Any]]:
         """
@@ -1081,7 +705,7 @@ class EmailTelegramForwarder:
             body = email_data.get("body", "")
             content_type = email_data.get("content_type", "text/plain")
             raw_html_body = email_data.get("raw_html_body")  # Сырой HTML для PDF/HTML файла
-            formatted_body = self.format_email_body(body, content_type)  # Очищенный текст для текстового режима
+            formatted_body = email_parser.format_email_body(body, content_type)  # Очищенный текст для текстового режима
             has_attachments = bool(email_data.get("attachments"))
             message_length = len(formatted_body)  # Длина очищенного текста
 
@@ -2055,8 +1679,8 @@ class EmailTelegramForwarder:
             parser = email.parser.BytesHeaderParser()
             header = parser.parsebytes(header_data)
 
-            subject = self.decode_mime_header(header.get("Subject", "Без темы"))
-            subject = self.clean_subject(subject)
+            subject = email_parser.decode_mime_header(header.get("Subject", "Без темы"))
+            subject = email_parser.clean_subject(subject)
             logger.debug(f"Извлечена тема '{subject}' для письма {msg_id.decode()}.")
 
             return subject
@@ -2118,7 +1742,7 @@ class EmailTelegramForwarder:
 
                         text_for_summary = None
                         if email_data.get('body'):
-                            text_for_summary = self.format_email_body(
+                            text_for_summary = email_parser.format_email_body(
                                 email_data.get('body', ''),
                                 email_data.get('content_type', 'text/plain')
                             )
