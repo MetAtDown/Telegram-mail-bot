@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Any, Union, Tuple
 from contextlib import contextmanager
 import queue
 import traceback
-
+import uuid
 from src.utils.logger import get_logger
 from src.config import settings
 from src.utils.cache_manager import is_cache_valid, invalidate_caches
@@ -29,6 +29,8 @@ class DatabaseManager:
 
     # Максимальный размер пула соединений
     _MAX_CONNECTIONS = 5
+    _SAFE_QUERIES = ('SELECT', 'PRAGMA', 'WITH', 'EXPLAIN')
+    _DANGEROUS_OPS = ["DROP", "TRUNCATE", "DELETE FROM users", "DELETE FROM subjects"]
 
     def __new__(cls, *args, **kwargs):
         """Реализация паттерна Singleton для работы с одним экземпляром БД."""
@@ -697,6 +699,173 @@ class DatabaseManager:
             prev_value = self._reset_pool
             self._reset_pool = True
             logger.debug(f"Установлен флаг сброса пула соединений (было {prev_value})")
+
+    @staticmethod
+    def get_common_queries() -> Dict[str, str]:
+        """
+        Возвращает словарь с готовыми SQL-запросами для админ-панели.
+        Сделан статическим, так как не зависит от состояния экземпляра.
+
+        Returns:
+            Словарь с именами запросов и их текстом.
+        """
+        return {
+            "Все пользователи": "SELECT * FROM users;",
+            "Все темы": "SELECT * FROM subjects;",
+            "Пользователи с темами": """
+                    SELECT u.chat_id, u.status, COUNT(s.id) as subject_count 
+                    FROM users u 
+                    LEFT JOIN subjects s ON u.chat_id = s.chat_id 
+                    GROUP BY u.chat_id;
+                """,
+            "Активные пользователи": "SELECT * FROM users WHERE status = 'Enable';",
+            "Неактивные пользователи": "SELECT * FROM users WHERE status = 'Disable';",
+            "Статистика": """
+                    SELECT 
+                        (SELECT COUNT(*) FROM users) as total_users,
+                        (SELECT COUNT(*) FROM users WHERE status = 'Enable') as active_users,
+                        (SELECT COUNT(*) FROM subjects) as total_subjects,
+                        (SELECT COUNT(DISTINCT subject) FROM subjects) as unique_subjects;
+                """,
+            "Популярные темы": """
+                    SELECT subject, COUNT(chat_id) as user_count
+                    FROM subjects
+                    GROUP BY subject
+                    ORDER BY user_count DESC
+                    LIMIT 20;
+                """,
+            "Пользователи без тем": """
+                    SELECT u.chat_id, u.status
+                    FROM users u
+                    LEFT JOIN subjects s ON u.chat_id = s.chat_id
+                    WHERE s.id IS NULL;
+                """
+        }
+
+    def get_table_list(self) -> List[str]:
+        """
+        Получение списка таблиц в базе данных. Использует кэш менеджера.
+
+        Returns:
+            Список имен таблиц.
+        """
+        cache_key = "table_list"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                tables = [row[0] for row in cursor.fetchall() if row[0] != 'sqlite_sequence']
+                self._set_in_cache(cache_key, tables)
+                return tables
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении списка таблиц: {e}")
+            return []
+
+    def get_table_info(self, table_name: str) -> List[Dict[str, Any]]:
+        """
+        Получение информации о структуре таблицы. Использует кэш менеджера.
+
+        Args:
+            table_name: Имя таблицы
+
+        Returns:
+            Список столбцов с их параметрами
+        """
+        cache_key = f"table_info_{table_name}"
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+
+        result = []
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                # Используем параметризацию даже для PRAGMA для безопасности
+                cursor.execute(f"PRAGMA table_info(?)", (table_name,))
+                columns = cursor.fetchall()
+                for column in columns:
+                    col_info = {
+                        'cid': column['cid'],
+                        'name': column['name'],
+                        'type': column['type'],
+                        'notnull': column['notnull'],
+                        'dflt_value': column['dflt_value'],
+                        'pk': column['pk']
+                    }
+                    result.append(col_info)
+                self._set_in_cache(cache_key, result)
+                return result
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка при получении информации о таблице {table_name}: {e}")
+            return []
+
+    def execute_query(
+            self,
+            query: str,
+            params: Optional[tuple] = None
+    ) -> Tuple[bool, List[Dict[str, Any]], List[str], Optional[str]]:
+        """
+        Унифицированное выполнение SQL-запроса для админ-панели.
+        Не использует кэш для произвольных запросов, чтобы всегда показывать актуальные данные.
+        Сохраняет контракт возвращаемого значения из `tools.py`.
+
+        Args:
+            query: SQL-запрос.
+            params: Параметры для безопасной подстановки.
+
+        Returns:
+            Кортеж (успех, результаты, заголовки, сообщение об ошибке/успехе).
+        """
+        if not query:
+            return False, [], [], "Запрос не может быть пустым"
+
+        # Проверка на потенциально опасные запросы
+        if any(op.upper() in query.upper() for op in self._DANGEROUS_OPS):
+            return False, [], [], "Опасные операции запрещены. Пожалуйста, используйте интерфейс для управления пользователями и темами."
+
+        query_id = str(uuid.uuid4())[:6]
+        query_with_comment = f"/* {time.time()} {query_id} */ {query}"
+
+        clean_query_upper = query.strip().upper()
+        is_modifying = not any(clean_query_upper.startswith(prefix) for prefix in self._SAFE_QUERIES)
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(query_with_comment, params or ())
+
+                # Для запросов на чтение (SELECT, PRAGMA и т.д.)
+                if not is_modifying:
+                    rows = cursor.fetchall()
+                    if not rows:
+                        return True, [], [], "Запрос не вернул данных"
+
+                    # Преобразуем в список словарей
+                    results = [{key: row[key] for key in row.keys()} for row in rows]
+                    headers = list(results[0].keys()) if results else []
+                    return True, results, headers, ""
+
+                # Для изменяющих запросов (INSERT, UPDATE, DELETE и др.)
+                else:
+                    conn.commit()
+                    affected = cursor.rowcount
+
+                    # Сбрасываем кэш менеджера и глобальный кэш
+                    self.refresh_data()
+
+                    message = "Запрос выполнен успешно."
+                    if affected >= 0:
+                        message += f" Затронуто строк: {affected}"
+
+                    return True, [], [], message
+
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка SQL: {e}, запрос: {query_with_comment[:200]}")
+            return False, [], [], f"Ошибка SQL: {e}"
 
     def get_all_subjects(self) -> Dict[str, List[Dict[str, Any]]]:
         """

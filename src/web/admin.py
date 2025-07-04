@@ -23,8 +23,6 @@ from src.config.constants import DEFAULT_DELIVERY_MODE, ALLOWED_DELIVERY_MODES, 
 from src.config import settings
 from src.utils.logger import get_logger
 from src.core.bot_status import get_bot_status, start_bot, stop_bot
-from src.db.tools import execute_query, get_table_list, get_table_info, get_common_queries, \
-    close_all_connections, clear_query_cache
 from src.db.manager import DatabaseManager
 from src.utils.cache_manager import invalidate_caches, is_cache_valid
 
@@ -170,8 +168,8 @@ def invalidate_all_caches():
     # Очищаем кэш приложения
     clear_cache()
 
-    # Очищаем кэш запросов из tools.py
-    clear_query_cache()
+    # Очищаем кэш запросов
+    clear_cache()
 
     # Сбрасываем кэш и соединения менеджера базы данных
     db_manager.refresh_data()
@@ -402,7 +400,6 @@ def signal_handler(sig, frame):
 
     # Освобождаем ресурсы
     executor.shutdown(wait=False)
-    close_all_connections()
 
     # Если используется менеджер базы данных, закрываем его
     if db_manager:
@@ -464,10 +461,10 @@ def sql_console():
 
     # Получаем данные из кэша или обновляем
     def get_tables():
-        return get_table_list(db_path)
+        return db_manager.get_table_list()
 
     tables = get_cached_data('table_list', get_tables, ttl=3600)  # Кэшируем на час
-    common_queries = get_common_queries()
+    common_queries = db_manager.get_common_queries()
 
     # Получаем параметры из формы и URL
     query = request.form.get('query', request.args.get('query', '').strip())
@@ -503,7 +500,7 @@ def sql_console():
 
         try:
             # Выполнение запроса без параметров
-            success, results, headers, error = execute_query(db_path, query)
+            success, results, headers, error = db_manager.execute_query(query)
 
             # Применяем поиск, если он указан
             if search_query and success and results:
@@ -534,7 +531,7 @@ def sql_console():
     table_info = {}
     for table in tables:
         def get_table_info_func(table_name=table):
-            return get_table_info(db_path, table_name)
+            return db_manager.get_table_info(table_name)
 
         table_info[table] = get_cached_data(f'table_info_{table}', get_table_info_func, ttl=3600)  # Кэшируем на час
 
