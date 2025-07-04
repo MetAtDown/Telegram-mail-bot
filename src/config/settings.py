@@ -1,5 +1,6 @@
 import os
 import secrets
+import logging
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -9,6 +10,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # Загрузка переменных окружения из файла .env
 env_path = PROJECT_ROOT / '.env'
 load_dotenv(dotenv_path=env_path)
+
+# === Настройки логирования ===
+# Словарь для безопасного преобразования строки в уровень логирования
+LOG_LEVELS = {
+    'DEBUG': logging.DEBUG,
+    'INFO': logging.INFO,
+    'WARNING': logging.WARNING,
+    'ERROR': logging.ERROR,
+    'CRITICAL': logging.CRITICAL,
+}
+
+# Читаем LOG_LEVEL из .env. Если его нет или значение некорректно,
+# по умолчанию будет logging.INFO
+_log_level_str = os.getenv('LOG_LEVEL', 'INFO').upper()
+LOG_LEVEL = LOG_LEVELS.get(_log_level_str, logging.INFO)
 
 # Настройки базы данных
 DATA_DIR = PROJECT_ROOT / 'data'
@@ -42,7 +58,6 @@ ADMIN_PASSWORD = os.getenv('ADMIN_PASSWORD')
 SECRET_KEY = os.getenv('SECRET_KEY', secrets.token_hex(16))
 
 # Системные настройки
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 CHECK_INTERVAL = int(os.getenv('CHECK_INTERVAL', 5))  # Минуты
 
 # Пути к директориям
@@ -52,5 +67,4 @@ TEMPLATES_DIR = PROJECT_ROOT / 'src' / 'web' / 'templates'
 STATIC_DIR = PROJECT_ROOT / 'src' / 'web' / 'static'
 
 # Проверка и создание необходимых директорий
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)

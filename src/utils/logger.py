@@ -2,67 +2,65 @@ import logging
 import sys
 from typing import Optional
 
+# Импортируем наши централизованные настройки
+from src.config import settings
+
+# Этот фильтр будет пропускать только сообщения с уровнем ниже WARNING
+class InfoFilter(logging.Filter):
+    def filter(self, record):
+        return record.levelno < logging.WARNING
+
 def setup_logger(
     name: str,
-    level: int = logging.INFO,
+    level: int,  # <-- Убрали значение по умолчанию, теперь уровень обязателен
     format_string: Optional[str] = None
 ) -> logging.Logger:
     """
-    Настройка логгера для вывода в консоль (stdout).
-
-    Args:
-        name: Имя логгера.
-        level: Уровень логирования (например, logging.INFO, logging.DEBUG).
-        format_string: Строка форматирования для логов.
-
-    Returns:
-        Настроенный экземпляр логгера.
+    Настройка логгера для вывода в stdout (INFO) и stderr (WARNINGS и выше).
     """
-    # Получаем или создаем логгер
     logger = logging.getLogger(name)
 
-    # Если логгер уже настроен с обработчиками, возвращаем его,
-    # чтобы избежать дублирования вывода.
+    # Проверяем, может логгер уже идеально настроен
     if logger.handlers and logger.level == level:
         return logger
 
-    # Устанавливаем уровень логирования
     logger.setLevel(level)
 
-    # Создаем форматтер для логов
     if format_string is None:
         format_string = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     formatter = logging.Formatter(format_string)
 
-    # Создаем обработчик для вывода в консоль (stdout)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setFormatter(formatter)
+    # --- Обработчик для stdout (INFO, DEBUG) ---
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    stdout_handler.addFilter(InfoFilter())
 
-    # Удаляем существующие обработчики (если есть) и добавляем новый консольный
+    # --- Обработчик для stderr (WARNING, ERROR, CRITICAL) ---
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(formatter)
+    stderr_handler.setLevel(logging.WARNING)
+
+    # Очищаем старые и добавляем новые обработчики
     if logger.hasHandlers():
         logger.handlers.clear()
 
-    logger.addHandler(console_handler)
+    logger.addHandler(stdout_handler)
+    logger.addHandler(stderr_handler)
 
-    # Устанавливаем свойство propagate в False, чтобы избежать дублирования
-    # записей в родительских логгерах (например, в root logger).
     logger.propagate = False
 
     return logger
 
-
 def get_logger(
     name: str,
-    level: int = logging.INFO
+    level: Optional[int] = None # <-- Принимаем уровень как опциональный
 ) -> logging.Logger:
     """
-    Упрощенная функция для получения настроенного логгера.
-
-    Args:
-        name: Имя логгера.
-        level: Уровень логирования.
-
-    Returns:
-        Экземпляр логгера.
+    Получение настроенного логгера.
+    Если уровень не передан явно, он будет взят из глобальных настроек.
     """
+    # Если уровень не был передан при вызове, берем его из settings.py
+    if level is None:
+        level = settings.LOG_LEVEL
+
     return setup_logger(name, level=level)
